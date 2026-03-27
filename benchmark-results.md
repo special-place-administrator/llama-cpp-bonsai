@@ -560,3 +560,16 @@ turbo3 PPL verified unchanged (5.8501).
 ### CUDA 13.2 Compatibility
 Built and tested with CUDA 13.2.0 (nvcc V13.2.51). No segfault, identical results.
 Turbo3 PPL: 5.8501 (identical). Turbo4 PPL: 5.8186 (identical).
+
+### Multi-Sequence (n_seq > 1) Fix — 2026-03-27
+
+Bug: turbo dequant-to-fp16 kernels in fattn.cu ignored ne[3] (stream dimension).
+With kv_unified=false (default) and n_seq > 1, only stream 0 was dequanted;
+other streams had uninitialized fp16 data, causing catastrophic PPL.
+
+| Config | Before fix | After fix |
+|--------|-----------|-----------|
+| turbo3 n_seq=1 | 6.31 | 6.31 |
+| turbo3 n_seq=2 | 17.10 | 6.30 |
+| turbo3 n_seq=4 | 22.56 | 6.34 |
+| turbo3 -kvu (unified) | 6.30 | 6.30 |
