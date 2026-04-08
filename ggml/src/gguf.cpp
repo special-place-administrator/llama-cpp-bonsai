@@ -317,6 +317,10 @@ struct gguf_reader {
         if (!read(tmp)) {
             return false;
         }
+        // Remap PrismML Q1_0 enum values (41, 42) to TurboQuant enum values (44, 45)
+        // PrismML uses 41=Q1_0_g128, 42=Q1_0; TurboQuant uses 41-43 for TURBO types
+        if (tmp == 41) { tmp = GGML_TYPE_Q1_0_g128; }
+        if (tmp == 42) { tmp = GGML_TYPE_Q1_0; }
         dst = ggml_type(tmp);
         return true;
     }

@@ -431,9 +431,11 @@ extern "C" {
         GGML_TYPE_TURBO3_0 = 41, // TurboQuant 3-bit KV cache: 2-bit PolarQuant + 1-bit QJL
         GGML_TYPE_TURBO4_0 = 42, // TurboQuant 4-bit KV cache: 3-bit PolarQuant + 1-bit QJL
         GGML_TYPE_TURBO2_0 = 43, // TurboQuant 2-bit KV cache: 2-bit PolarQuant, no QJL
-        GGML_TYPE_TURBO3_TCQ = 44, // TurboQuant 3-bit KV cache: TCQ (Trellis-Coded Quantization)
-        GGML_TYPE_TURBO2_TCQ = 45, // TurboQuant 2-bit KV cache: TCQ (k=2, L=8, 256 states)
-        GGML_TYPE_COUNT   = 46,
+        GGML_TYPE_Q1_0_g128 = 44, // PrismML 1-bit (binary), 128 group size
+        GGML_TYPE_Q1_0    = 45, // PrismML 1-bit (binary), 32 group size
+        GGML_TYPE_TURBO3_TCQ = 46, // TurboQuant 3-bit KV cache: TCQ (Trellis-Coded Quantization)
+        GGML_TYPE_TURBO2_TCQ = 47, // TurboQuant 2-bit KV cache: TCQ (k=2, L=8, 256 states)
+        GGML_TYPE_COUNT   = 48,
     };
 
     // precision

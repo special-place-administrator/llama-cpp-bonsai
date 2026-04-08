@@ -93,6 +93,12 @@ typedef sycl::half2 ggml_half2;
 // QR = QK / number of values before dequantization
 // QI = number of 32 bit integers before dequantization
 
+#define QI1_0 (QK1_0 / 32)  // Number of int32s needed for QK1_0 bits (QK1_0/32)
+#define QR1_0 1              // 1 bit per quantized element
+
+#define QI1_0_g128 (QK1_0_g128 / 32)
+#define QR1_0_g128 1
+
 #define QI4_0 (QK4_0 / (4 * QR4_0))
 #define QR4_0 2
 
@@ -246,6 +252,24 @@ typedef struct {
     int8_t qs[QK8_1]; // quants
 } block_q8_1;
 static_assert(sizeof(block_q8_1) == 2*sizeof(ggml_half) + QK8_1, "wrong q8_1 block size/padding");
+
+//
+// Binary 1-bit quantization (PrismML Q1_0)
+//
+
+#define QK1_0 32
+typedef struct {
+    ggml_half d;           // delta
+    uint8_t qs[QK1_0 / 8]; // bits / quants
+} block_q1_0;
+static_assert(sizeof(block_q1_0) == sizeof(ggml_half) + QK1_0 / 8, "wrong q1_0 block size/padding");
+
+#define QK1_0_g128 128
+typedef struct {
+    ggml_half d;               // delta
+    uint8_t qs[QK1_0_g128 / 8]; // bits / quants
+} block_q1_0_g128;
+static_assert(sizeof(block_q1_0_g128) == sizeof(ggml_half) + QK1_0_g128 / 8, "wrong q1_0_g128 block size/padding");
 
 //
 // Ternary quantization
