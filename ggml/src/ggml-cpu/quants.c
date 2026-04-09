@@ -386,21 +386,18 @@ void ggml_vec_dot_q1_0_q8_1_generic(int n, float * GGML_RESTRICT s, size_t bs, c
     float sumf = 0.0f;
 
     for (int i = 0; i < nb; i++) {
-        const float d = GGML_FP16_TO_FP32(x[i].d);
+        const float d_q1 = GGML_FP16_TO_FP32(x[i].d);
+        const float d_q8 = GGML_FP16_TO_FP32(y[i].d);
 
-        int sum_all = 0;
-        int sum_set = 0;
+        int sumi = 0;
 
         for (int j = 0; j < QK1_0; j++) {
             const int bit = (x[i].qs[j / 8] >> (j % 8)) & 1;
             const int8_t q8val = ((const int8_t *)y[i].qs)[j];
-            sum_all += q8val;
-            if (bit) {
-                sum_set += q8val;
-            }
+            sumi += bit ? q8val : -q8val;
         }
 
-        sumf += d * (2.0f * sum_set - sum_all);
+        sumf += d_q1 * d_q8 * (float)sumi;
     }
 
     *s = sumf;
@@ -420,26 +417,26 @@ void ggml_vec_dot_q1_0_g128_q8_1_generic(int n, float * GGML_RESTRICT s, size_t 
     float sumf = 0.0f;
 
     for (int i = 0; i < nb; i++) {
-        const float d = GGML_FP16_TO_FP32(x[i].d);
-
-        int sum_all = 0;
-        int sum_set = 0;
+        const float d_q1 = GGML_FP16_TO_FP32(x[i].d);
 
         // Each Q1_0_g128 block has 128 elements = 4 Q8_1 blocks
         const int q8_blocks_per_q1 = QK1_0_g128 / QK8_1;
 
-        for (int j = 0; j < QK1_0_g128; j++) {
-            const int bit = (x[i].qs[j / 8] >> (j % 8)) & 1;
-            const int q8_block = j / QK8_1;
-            const int q8_idx   = j % QK8_1;
-            const int8_t q8val = ((const int8_t *)y[i * q8_blocks_per_q1 + q8_block].qs)[q8_idx];
-            sum_all += q8val;
-            if (bit) {
-                sum_set += q8val;
-            }
-        }
+        for (int b = 0; b < q8_blocks_per_q1; b++) {
+            const int q8_idx = i * q8_blocks_per_q1 + b;
+            const float d_q8 = GGML_FP16_TO_FP32(y[q8_idx].d);
 
-        sumf += d * (2.0f * sum_set - sum_all);
+            int sumi = 0;
+
+            for (int j = 0; j < QK8_1; j++) {
+                const int bit_pos = b * QK8_1 + j;
+                const int bit = (x[i].qs[bit_pos / 8] >> (bit_pos % 8)) & 1;
+                const int8_t q8val = ((const int8_t *)y[q8_idx].qs)[j];
+                sumi += bit ? q8val : -q8val;
+            }
+
+            sumf += d_q1 * d_q8 * (float)sumi;
+        }
     }
 
     *s = sumf;
