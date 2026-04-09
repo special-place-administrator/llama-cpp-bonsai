@@ -372,6 +372,79 @@ void ggml_vec_dot_q8_0_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, c
     *s = sumf;
 }
 
+void ggml_vec_dot_q1_0_q8_1_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_q1_0 * GGML_RESTRICT x = vx;
+    const block_q8_1 * GGML_RESTRICT y = vy;
+    const int nb = n / QK1_0;
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+
+        int sum_all = 0;
+        int sum_set = 0;
+
+        for (int j = 0; j < QK1_0; j++) {
+            const int bit = (x[i].qs[j / 8] >> (j % 8)) & 1;
+            const int8_t q8val = ((const int8_t *)y[i].qs)[j];
+            sum_all += q8val;
+            if (bit) {
+                sum_set += q8val;
+            }
+        }
+
+        sumf += d * (2.0f * sum_set - sum_all);
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_q1_0_g128_q8_1_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_q1_0_g128 * GGML_RESTRICT x = vx;
+    const block_q8_1     * GGML_RESTRICT y  = vy;
+    const int nb = n / QK1_0_g128;
+
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+
+        int sum_all = 0;
+        int sum_set = 0;
+
+        // Each Q1_0_g128 block has 128 elements = 4 Q8_1 blocks
+        const int q8_blocks_per_q1 = QK1_0_g128 / QK8_1;
+
+        for (int j = 0; j < QK1_0_g128; j++) {
+            const int bit = (x[i].qs[j / 8] >> (j % 8)) & 1;
+            const int q8_block = j / QK8_1;
+            const int q8_idx   = j % QK8_1;
+            const int8_t q8val = ((const int8_t *)y[i * q8_blocks_per_q1 + q8_block].qs)[q8_idx];
+            sum_all += q8val;
+            if (bit) {
+                sum_set += q8val;
+            }
+        }
+
+        sumf += d * (2.0f * sum_set - sum_all);
+    }
+
+    *s = sumf;
+}
+
 void ggml_vec_dot_tq1_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     assert(nrc == 1);
     UNUSED(nrc);
