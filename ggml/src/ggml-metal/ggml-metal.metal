@@ -345,96 +345,67 @@ void quantize_iq4_nl(device const float * src, device block_iq4_nl & dst) {
     dst.d = sumq2 > 0 ? sumqx/sumq2 : d;
 }
 
-// ----- RotorQuant quantize/dequantize with Fast Walsh-Hadamard rotation -----
-// Uses O(d log d) WHT instead of O(d²) dense matvec (18× fewer operations)
-// 512 bytes of sign arrays instead of 256KB of dense matrices
+// ----- RotorQuant quantize/dequantize with Givens 2D block-diagonal rotation -----
+// 64 Givens pairs for d=128. Constants match CPU ggml-rq-quant.c exactly.
 // ===== INLINED rq-rotate.h =====
-// RotorQuant Fast Walsh-Hadamard rotation for Metal
-// Replaces 256KB dense matrices with 512 bytes of sign arrays + O(d log d) butterfly
-// Generated with seed=42 (rotation) and seed=1042 (QJL)
 
-// --- Rotation sign arrays ---
-constant float rq_wht_signs1[128] = {
-    -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f};
-constant float rq_wht_signs2[128] = {
-    1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f};
-
-// --- Pre-packed half4 sign arrays for vectorized WHT (eliminates float→half conversion) ---
-constant half4 rq_wht_signs1_h4[32] = {
-    half4(-1.0h, 1.0h, 1.0h, -1.0h), half4(-1.0h, 1.0h, -1.0h, 1.0h),
-    half4(-1.0h, -1.0h, 1.0h, 1.0h), half4(1.0h, 1.0h, 1.0h, 1.0h),
-    half4(1.0h, -1.0h, 1.0h, -1.0h), half4(1.0h, -1.0h, -1.0h, 1.0h),
-    half4(1.0h, 1.0h, -1.0h, 1.0h), half4(1.0h, -1.0h, -1.0h, -1.0h),
-    half4(-1.0h, 1.0h, 1.0h, -1.0h), half4(1.0h, 1.0h, -1.0h, 1.0h),
-    half4(-1.0h, 1.0h, 1.0h, -1.0h), half4(-1.0h, 1.0h, -1.0h, 1.0h),
-    half4(1.0h, 1.0h, 1.0h, -1.0h), half4(-1.0h, -1.0h, -1.0h, -1.0h),
-    half4(1.0h, -1.0h, 1.0h, 1.0h), half4(1.0h, 1.0h, -1.0h, 1.0h),
-    half4(-1.0h, -1.0h, 1.0h, -1.0h), half4(-1.0h, -1.0h, 1.0h, -1.0h),
-    half4(-1.0h, -1.0h, 1.0h, -1.0h), half4(-1.0h, -1.0h, 1.0h, 1.0h),
-    half4(1.0h, -1.0h, -1.0h, 1.0h), half4(1.0h, 1.0h, -1.0h, -1.0h),
-    half4(1.0h, 1.0h, -1.0h, 1.0h), half4(1.0h, -1.0h, 1.0h, -1.0h),
-    half4(-1.0h, 1.0h, 1.0h, -1.0h), half4(1.0h, -1.0h, 1.0h, -1.0h),
-    half4(1.0h, 1.0h, 1.0h, 1.0h), half4(-1.0h, 1.0h, -1.0h, 1.0h),
-    half4(1.0h, -1.0h, 1.0h, 1.0h), half4(-1.0h, -1.0h, -1.0h, -1.0h),
-    half4(-1.0h, 1.0h, 1.0h, -1.0h), half4(1.0h, 1.0h, -1.0h, 1.0h)
-};
-constant half4 rq_wht_signs2_h4[32] = {
-    half4(1.0h, 1.0h, 1.0h, 1.0h), half4(-1.0h, 1.0h, 1.0h, -1.0h),
-    half4(1.0h, -1.0h, -1.0h, -1.0h), half4(1.0h, -1.0h, -1.0h, -1.0h),
-    half4(1.0h, 1.0h, -1.0h, -1.0h), half4(1.0h, -1.0h, 1.0h, -1.0h),
-    half4(1.0h, -1.0h, -1.0h, 1.0h), half4(-1.0h, 1.0h, 1.0h, 1.0h),
-    half4(1.0h, 1.0h, -1.0h, -1.0h), half4(-1.0h, 1.0h, -1.0h, -1.0h),
-    half4(-1.0h, -1.0h, -1.0h, -1.0h), half4(1.0h, 1.0h, 1.0h, -1.0h),
-    half4(1.0h, -1.0h, 1.0h, 1.0h), half4(1.0h, -1.0h, -1.0h, 1.0h),
-    half4(-1.0h, -1.0h, -1.0h, -1.0h), half4(-1.0h, -1.0h, 1.0h, 1.0h),
-    half4(1.0h, -1.0h, 1.0h, -1.0h), half4(-1.0h, -1.0h, -1.0h, 1.0h),
-    half4(-1.0h, 1.0h, -1.0h, 1.0h), half4(-1.0h, -1.0h, 1.0h, 1.0h),
-    half4(-1.0h, 1.0h, -1.0h, 1.0h), half4(1.0h, -1.0h, 1.0h, -1.0h),
-    half4(-1.0h, -1.0h, -1.0h, 1.0h), half4(-1.0h, -1.0h, 1.0h, -1.0h),
-    half4(1.0h, -1.0h, 1.0h, 1.0h), half4(1.0h, -1.0h, -1.0h, 1.0h),
-    half4(-1.0h, 1.0h, -1.0h, 1.0h), half4(1.0h, -1.0h, -1.0h, 1.0h),
-    half4(-1.0h, 1.0h, -1.0h, 1.0h), half4(1.0h, -1.0h, 1.0h, -1.0h),
-    half4(1.0h, -1.0h, -1.0h, -1.0h), half4(-1.0h, -1.0h, 1.0h, -1.0h)
+// --- PlanarQuant Givens cos/sin (64 pairs for d=128) ---
+constant float rq_cos[64] = {
+    0.7386546135f, 0.8607548475f, -0.7411674857f, 0.9674890637f,
+   -0.7723053098f, -0.8056974411f, -0.0412844308f, 0.2707833052f,
+    0.9315500855f, 0.6698185802f, 0.9167487621f, -0.8320636749f,
+    0.6818146110f, -0.9108457565f, -0.0559285842f, -0.9032276273f,
+    0.7519487143f, -0.8941103816f, -0.1039871648f, -0.6961420774f,
+   -0.1230370328f, -0.9328963161f, -0.2905603051f, 0.4910068214f,
+    0.7889407277f, -0.1221836656f, -0.6316579580f, 0.3128163815f,
+   -0.9563610554f, 0.9992509484f, 0.9540294409f, 0.8902468085f,
+    0.7543080449f, -0.8664138913f, -0.5232898593f, 0.3621287644f,
+   -0.8825117350f, 0.8234673142f, -0.9416025877f, -0.5480425358f,
+   -0.6644080281f, -0.6585279703f, -0.2460795939f, 0.9438471198f,
+    0.2427810431f, -0.1960992366f, 0.2403578013f, -0.8461306095f,
+    0.0246123374f, 0.3372744620f, 0.9994974732f, -0.3494733870f,
+    0.7438930869f, 0.8452339768f, -0.6177822948f, -0.2662552595f,
+   -0.5457068086f, -0.9985070229f, 0.7757105827f, 0.6141811609f,
+   -0.9805000424f, 0.5425475240f, -0.5663578510f, -0.4696439803f
 };
 
-// --- QJL sign arrays ---
-constant float rq_qjl_wht_signs1[128] = {
-    1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f};
-constant float rq_qjl_wht_signs2[128] = {
-    1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f};
+constant float rq_sin[64] = {
+   -0.6740840673f, -0.5090196729f, 0.6713201404f, -0.2529129684f,
+    0.6352515221f, -0.5923272967f, 0.9991474152f, -0.9626403451f,
+   -0.3636130989f, 0.7425247431f, -0.3994642496f, -0.5546801090f,
+   -0.7315250039f, -0.4127469361f, -0.9984347820f, 0.4291617870f,
+   -0.6592215896f, -0.4478466809f, 0.9945786595f, -0.7179040313f,
+    0.9924020767f, 0.3601450622f, 0.9568566680f, -0.8711557388f,
+    0.6144692898f, 0.9925075173f, 0.7752471566f, 0.9498136044f,
+   -0.2921875417f, 0.0386975110f, -0.2997128963f, 0.4554784000f,
+   -0.6565206647f, -0.4993265271f, 0.8521547318f, -0.9321280718f,
+   -0.4702904224f, -0.5673637390f, -0.3367263079f, 0.8364504576f,
+   -0.7473700047f, 0.7525562644f, -0.9692496061f, -0.3303825557f,
+   -0.9700810909f, 0.9805840850f, -0.9706843495f, -0.5329755545f,
+   -0.9996970892f, 0.9414063692f, 0.0316982083f, 0.9369462729f,
+    0.6682986617f, -0.5343964100f, -0.7863491774f, -0.9639025331f,
+   -0.8379761577f, 0.0546237342f, -0.6310887933f, 0.7891650796f,
+   -0.1965190321f, 0.8400250673f, -0.8241594434f, 0.8828558922f
+};
 
-// --- Fast Walsh-Hadamard Transform (in-place, normalized) ---
-// O(n log n) = 896 operations for n=128, vs O(n²) = 16384 for dense matvec
-static void rq_fwht_128(thread float * x) {
-    for (int h = 1; h < 128; h *= 2) {
-        for (int i = 0; i < 128; i += h * 2) {
-            for (int j = i; j < i + h; j++) {
-                float a = x[j];
-                float b = x[j + h];
-                x[j]     = a + b;
-                x[j + h] = a - b;
-            }
-        }
-    }
-    // Normalize by 1/sqrt(128)
-    const float inv_sqrt_128 = 0.08838834764831845f; // 1/sqrt(128)
-    for (int i = 0; i < 128; i++) {
-        x[i] *= inv_sqrt_128;
+// --- Forward Givens rotation (64 pairs, in-place) ---
+static void rq_rotate_forward(thread float * x) {
+    for (int p = 0; p < 64; p++) {
+        float v0 = x[2*p];
+        float v1 = x[2*p + 1];
+        x[2*p]     = rq_cos[p] * v0 - rq_sin[p] * v1;
+        x[2*p + 1] = rq_sin[p] * v0 + rq_cos[p] * v1;
     }
 }
 
-// --- Forward rotation: signs1 → FWHT → signs2 ---
-static void rq_rotate_forward(thread float * x, constant float * s1, constant float * s2) {
-    for (int i = 0; i < 128; i++) x[i] *= s1[i];
-    rq_fwht_128(x);
-    for (int i = 0; i < 128; i++) x[i] *= s2[i];
-}
-
-// --- Inverse rotation: signs2 → FWHT → signs1 (FWHT is its own inverse) ---
-static void rq_rotate_inverse(thread float * x, constant float * s1, constant float * s2) {
-    for (int i = 0; i < 128; i++) x[i] *= s2[i];
-    rq_fwht_128(x);
-    for (int i = 0; i < 128; i++) x[i] *= s1[i];
+// --- Inverse Givens rotation (transpose = negate sin) ---
+static void rq_rotate_inverse(thread float * x) {
+    for (int p = 0; p < 64; p++) {
+        float q0 = x[2*p];
+        float q1 = x[2*p + 1];
+        x[2*p]     =  rq_cos[p] * q0 + rq_sin[p] * q1;
+        x[2*p + 1] = -rq_sin[p] * q0 + rq_cos[p] * q1;
+    }
 }
 
 // ===== END rq-rotate.h =====
@@ -499,8 +470,8 @@ void quantize_rq4_0(device const float * src, device block_rq4_0 & dst) {
     float normalized[128];
     for (int j = 0; j < 128; j++) normalized[j] = x[j];
 
-    // Step 2: WHT rotate in-place
-    rq_rotate_forward(x, rq_wht_signs1, rq_wht_signs2);
+    // Step 2: Givens rotate in-place
+    rq_rotate_forward(x);
 
     // Step 3: 3-bit quantization
     for (int j = 0; j < QK_RQ4 * 3 / 8; j++) dst.qs[j] = 0;
@@ -529,8 +500,7 @@ void quantize_rq4_0(device const float * src, device block_rq4_0 & dst) {
         }
     }
 
-    // Step 4: inverse WHT rotation + residual
-    // rq_rotate_inverse REMOVED — pre-rotate-queries handles this
+    // Step 4: residual (inverse rotation removed — pre-rotate-queries handles this)
     float rnorm_sq = 0.0f;
     for (int j = 0; j < 128; j++) {
         x[j] = normalized[j] - recon[j]; // residual in x buffer
@@ -538,8 +508,8 @@ void quantize_rq4_0(device const float * src, device block_rq4_0 & dst) {
     }
     dst.rnorm = half(sqrt(rnorm_sq));
 
-    // Step 5: QJL WHT signs
-    rq_rotate_forward(x, rq_qjl_wht_signs1, rq_qjl_wht_signs2);
+    // Step 5: QJL Givens rotation (reuses same rotation for sign projection)
+    rq_rotate_forward(x);
     for (int i = 0; i < 128; i++) {
         if (x[i] >= 0.0f) {
             dst.signs[i / 8] |= (1 << (i % 8));
@@ -552,45 +522,7 @@ void quantize_rq4_0(device const float * src, device block_rq4_0 & dst) {
 // up to 32× per block (once per 4-element chunk). We cache the full
 // dequantized block per thread and only recompute when the block pointer changes.
 
-// rq3 dequant — full block dequantize with inverse rotation
-// Must process all 128 elements to apply WHT inverse rotation
-// Half-precision vectorized WHT for faster dequant.
-// Uses half4 vectors for 4-wide SIMD throughput on Apple GPU.
-// Centroids fit in fp16 (max |val| = 0.19), butterfly stays in range.
-static void rq_fwht_128_half4(thread half4 * v) {
-    // 32 half4 vectors = 128 elements
-    // Stage h=1: butterfly between elements 0,1 and 2,3 within each half4
-    for (int i = 0; i < 32; i++) {
-        half4 a = v[i];
-        v[i] = half4(a.x + a.y, a.x - a.y, a.z + a.w, a.z - a.w);
-    }
-    // Stage h=2: butterfly between elements 0,2 and 1,3 within each half4
-    for (int i = 0; i < 32; i++) {
-        half4 a = v[i];
-        v[i] = half4(a.x + a.z, a.y + a.w, a.x - a.z, a.y - a.w);
-    }
-    // Stages h=4,8,16,32,64: butterfly between half4 vectors
-    for (int h = 4; h < 128; h *= 2) {
-        int vec_stride = h / 4;  // distance in half4 units
-        for (int i = 0; i < 32; i++) {
-            int group_pos = i % (2 * vec_stride);
-            if (group_pos < vec_stride) {
-                int partner = i + vec_stride;
-                half4 a = v[i];
-                half4 b = v[partner];
-                v[i]       = a + b;
-                v[partner] = a - b;
-            }
-        }
-    }
-    // Normalize
-    const half4 inv_sqrt_128 = half4(0.08838834764831845h);
-    for (int i = 0; i < 32; i++) {
-        v[i] *= inv_sqrt_128;
-    }
-}
-
-// Block-32 dequant: no WHT needed (graph handles rotation). Just centroid lookup + norm scale.
+// Block-32 dequant: no rotation needed (graph handles rotation). Just centroid lookup + norm scale.
 // With QK_RQ3=32: nl=2 for non-vec FA (32/16), nl=8 for vec FA (32/4).
 // Much less redundant work than block-128.
 
@@ -652,7 +584,7 @@ static void rq4_dequantize_full_block(device const block_rq4_0 * xb, thread floa
     const float rnorm = float(xb->rnorm);
     const float qjl_scale = 1.2533141f / 128.0f * rnorm;
 
-    // Unpack 3-bit indices → centroids, then inverse WHT
+    // Unpack 3-bit indices → centroids (inverse rotation removed — pre-rotate-queries handles this)
     float recon[128];
     for (int j = 0; j < 128; j++) {
         int bit_offset = j * 3;
@@ -665,14 +597,12 @@ static void rq4_dequantize_full_block(device const block_rq4_0 * xb, thread floa
         uint8_t idx = (uint8_t)((raw >> bit_pos) & 0x7);
         recon[j] = rq_centroids_3bit[idx];
     }
-    // rq_rotate_inverse REMOVED — pre-rotate-queries handles this
 
-    // QJL: unpack signs, inverse WHT, scale
+    // QJL: unpack signs, scale (inverse rotation removed — pre-rotate-queries handles this)
     float signs_f[128];
     for (int j = 0; j < 128; j++) {
         signs_f[j] = (xb->signs[j / 8] & (1 << (j % 8))) ? 1.0f : -1.0f;
     }
-    // rq_rotate_inverse(QJL) REMOVED — pre-rotate-queries handles this
 
     for (int i = 0; i < 128; i++) {
         cache[i] = (recon[i] + signs_f[i] * qjl_scale) * norm;
@@ -3033,10 +2963,9 @@ template [[host_name("kernel_gated_delta_net_f32_2")]] kernel kernel_gated_delta
 template [[host_name("kernel_gated_delta_net_f32_4")]] kernel kernel_gated_delta_net_t kernel_gated_delta_net_impl<float4, 4>;
 #endif
 
-// ===== RotorQuant Walsh-Hadamard Transform kernel =====
-// O(d log d) rotation for 128-element groups. Replaces dense 128x128 matmul.
-// Each thread processes one 128-element group using half4 vectorized butterfly.
-// Uses the same WHT signs already defined (rq_wht_signs1/2, rq_wht_signs1_h4/2_h4).
+// ===== RotorQuant Givens rotation kernel =====
+// 64 Givens pair rotations for 128-element groups.
+// Each thread processes one 128-element group (64 multiply-add pairs).
 
 kernel void kernel_rq_rotate(
         constant ggml_metal_kargs_rq_rotate & args,
@@ -3053,51 +2982,24 @@ kernel void kernel_rq_rotate(
     const device float * in = src + group_idx * 128;
     device float * out = dst + group_idx * 128;
 
-    // Load into half4 vectors for fast butterfly
-    half4 v[32];
     const bool is_inverse = (args.direction == 1);
 
-    // Apply first signs (s1 for fwd, s2 for inv)
-    for (int i = 0; i < 32; i++) {
-        float4 f = float4(in[i*4], in[i*4+1], in[i*4+2], in[i*4+3]);
-        half4 s = is_inverse ? rq_wht_signs2_h4[i] : rq_wht_signs1_h4[i];
-        v[i] = half4(f) * s;
-    }
+    // Apply 64 Givens pair rotations
+    for (int p = 0; p < 64; p++) {
+        float v0 = in[2*p];
+        float v1 = in[2*p + 1];
+        float c = rq_cos[p];
+        float s = rq_sin[p];
 
-    // WHT butterfly (7 stages, vectorized half4)
-    // h=1: within each half4
-    for (int i = 0; i < 32; i++) {
-        half4 a = v[i];
-        v[i] = half4(a.x + a.y, a.x - a.y, a.z + a.w, a.z - a.w);
-    }
-    // h=2: within each half4
-    for (int i = 0; i < 32; i++) {
-        half4 a = v[i];
-        v[i] = half4(a.x + a.z, a.y + a.w, a.x - a.z, a.y - a.w);
-    }
-    // h=4..64: between half4 vectors
-    for (int h = 4; h < 128; h *= 2) {
-        int vec_stride = h / 4;
-        for (int i = 0; i < 32; i++) {
-            int group_pos = i % (2 * vec_stride);
-            if (group_pos < vec_stride) {
-                int partner = i + vec_stride;
-                half4 a = v[i], b = v[partner];
-                v[i]       = a + b;
-                v[partner] = a - b;
-            }
+        if (is_inverse) {
+            // Inverse: transpose rotation (negate sin)
+            out[2*p]     =  c * v0 + s * v1;
+            out[2*p + 1] = -s * v0 + c * v1;
+        } else {
+            // Forward rotation
+            out[2*p]     = c * v0 - s * v1;
+            out[2*p + 1] = s * v0 + c * v1;
         }
-    }
-
-    // Apply second signs + normalize, write output as fp32
-    const half4 inv_sqrt = half4(0.08838834764831845h);
-    for (int i = 0; i < 32; i++) {
-        half4 s = is_inverse ? rq_wht_signs1_h4[i] : rq_wht_signs2_h4[i];
-        float4 f = float4(v[i] * inv_sqrt * s);
-        out[i*4]   = f.x;
-        out[i*4+1] = f.y;
-        out[i*4+2] = f.z;
-        out[i*4+3] = f.w;
     }
 }
 
@@ -9516,7 +9418,7 @@ kernel void kernel_set_rows_rq(
 
         float x[128];
         for (int j = 0; j < 128; j++) x[j] = grp_src[j] * inv_norm;
-        rq_rotate_forward(x, rq_wht_signs1, rq_wht_signs2);
+        rq_rotate_forward(x);
 
         // Split into 4 blocks of 32 elements each
         // All blocks store the SAME group norm — centroids are in normalized space
