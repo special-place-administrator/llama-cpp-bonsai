@@ -16,10 +16,10 @@ static __device__ int   d_innerq_calibrate;              // 1 = accumulate stats
 static __device__ int   d_innerq_is_k;                   // 1 = current set_rows is K cache, 0 = V cache
 
 // Forward declaration: fattn compilation unit has its own copy of inverse scales
-extern void turbo_innerq_update_fattn_scales(const float * scale_inv);
-extern void turbo_innerq_init_fattn();
-extern void turbo_q_calibrate_init();
-extern void turbo_q_calibrate_finalize();
+extern void rq_innerq_update_fattn_scales(const float * scale_inv);
+extern void rq_innerq_init_fattn();
+extern void rq_q_calibrate_init();
+extern void rq_q_calibrate_finalize();
 
 // TCQ error dump: save post-FWHT normalized values and output symbols for autocorrelation analysis
 static __device__ float   * d_tcq_dump_x_buf   = nullptr; // [max_groups][128] original values
@@ -27,8 +27,8 @@ static __device__ uint8_t * d_tcq_dump_out_buf  = nullptr; // [max_groups][128] 
 static __device__ int       d_tcq_dump_max      = 0;       // max groups to dump (0 = disabled)
 
 // === Post-FWHT data extraction for empirical codebook computation ===
-// Enabled by TURBO_EXTRACT=<max_samples> env var (e.g. TURBO_EXTRACT=2000000)
-// Dumps post-rotation normalized values to /tmp/turbo_postrot.bin (float32)
+// Enabled by RQ_EXTRACT=<max_samples> env var (e.g. RQ_EXTRACT=2000000)
+// Dumps post-rotation normalized values to /tmp/rq_postrot.bin (float32)
 // Device-visible extraction state
 static __device__ float * d_extract_buf_ptr = nullptr;
 static __device__ int   * d_extract_pos_ptr = nullptr;
@@ -40,7 +40,7 @@ static int   * h_extract_gpu_pos = nullptr;
 static int     h_extract_max = 0;
 static int     h_extract_state = 0;  // 0=uninit, 1=collecting, 2=done
 
-static void turbo_extract_init(int max_samples) {
+static void rq_extract_init(int max_samples) {
 	cudaMalloc(&h_extract_gpu_buf, (size_t)max_samples * sizeof(float));
 	cudaMalloc(&h_extract_gpu_pos, sizeof(int));
 	int zero = 0;
@@ -50,10 +50,10 @@ static void turbo_extract_init(int max_samples) {
 	cudaMemcpyToSymbol(d_extract_max_val, &max_samples, sizeof(int));
 	h_extract_max = max_samples;
 	h_extract_state = 1;
-	fprintf(stderr, "TURBO_EXTRACT: collecting up to %d post-rotation samples\n", max_samples);
+	fprintf(stderr, "RQ_EXTRACT: collecting up to %d post-rotation samples\n", max_samples);
 }
 
-static void turbo_extract_check_done() {
+static void rq_extract_check_done() {
 	if (h_extract_state != 1) return;
 	int pos;
 	cudaMemcpy(&pos, h_extract_gpu_pos, sizeof(int), cudaMemcpyDeviceToHost);
@@ -62,12 +62,12 @@ static void turbo_extract_check_done() {
 	if (pos > h_extract_max) pos = h_extract_max;
 	float * host_buf = (float *)malloc((size_t)pos * sizeof(float));
 	cudaMemcpy(host_buf, h_extract_gpu_buf, (size_t)pos * sizeof(float), cudaMemcpyDeviceToHost);
-	const char * path = "/tmp/turbo_postrot.bin";
+	const char * path = "/tmp/rq_postrot.bin";
 	FILE * fp = fopen(path, "wb");
 	if (fp) {
 		fwrite(host_buf, sizeof(float), pos, fp);
 		fclose(fp);
-		fprintf(stderr, "TURBO_EXTRACT: wrote %d samples to %s (%.1f MB)\n",
+		fprintf(stderr, "RQ_EXTRACT: wrote %d samples to %s (%.1f MB)\n",
 				pos, path, (float)pos * sizeof(float) / (1024*1024));
 	}
 	free(host_buf);
@@ -82,11 +82,11 @@ static void turbo_extract_check_done() {
 	cudaFree(h_extract_gpu_pos); h_extract_gpu_pos = nullptr;
 	h_extract_state = 2;
 	// Also finalize Q² calibration if running
-	turbo_q_calibrate_finalize();
+	rq_q_calibrate_finalize();
 }
 
 // Device-side: append 128 post-rotation values to extraction buffer
-static __device__ void turbo_extract_append(const float * x) {
+static __device__ void rq_extract_append(const float * x) {
 	if (!d_extract_buf_ptr || !d_extract_pos_ptr) return;
 	int base = atomicAdd(d_extract_pos_ptr, 128);
 	if (base + 128 <= d_extract_max_val) {
@@ -95,7 +95,7 @@ static __device__ void turbo_extract_append(const float * x) {
 }
 
 // Host-side init: set identity scales, zero accumulators
-static void turbo_innerq_init() {
+static void rq_innerq_init() {
     float ones[128];
     for (int i = 0; i < 128; i++) ones[i] = 1.0f;
     float zeros[128] = {};
@@ -107,17 +107,17 @@ static void turbo_innerq_init() {
     cudaMemcpyToSymbol(d_innerq_count, &zero, sizeof(zero));
     cudaMemcpyToSymbol(d_innerq_calibrate, &zero, sizeof(zero));
     cudaMemcpyToSymbol(d_innerq_is_k, &zero, sizeof(zero));
-    turbo_innerq_init_fattn();
-    turbo_q_calibrate_init();
+    rq_innerq_init_fattn();
+    rq_q_calibrate_init();
 }
 
 // Host-side: set K/V flag before kernel launch (called from set-rows.cu)
-static void turbo_innerq_set_is_k(int is_k) {
+static void rq_innerq_set_is_k(int is_k) {
     cudaMemcpyToSymbol(d_innerq_is_k, &is_k, sizeof(int));
 }
 
 // Host-side: enable calibration mode
-static void turbo_innerq_start_calibration() {
+static void rq_innerq_start_calibration() {
     float zeros[128] = {};
     int zero = 0, one = 1;
     cudaMemcpyToSymbol(d_innerq_channel_sq, zeros, sizeof(zeros));
@@ -127,7 +127,7 @@ static void turbo_innerq_start_calibration() {
 }
 
 // Host-side: finalize calibration — compute scales from accumulated stats
-static void turbo_innerq_finalize_calibration() {
+static void rq_innerq_finalize_calibration() {
     int zero = 0;
     cudaMemcpyToSymbol(d_innerq_calibrate, &zero, sizeof(zero));
 
@@ -140,10 +140,10 @@ static void turbo_innerq_finalize_calibration() {
     if (count == 0) return;
 
     // Mode: 0=RMS-based (default), 1=max-based (paper's formula: sqrt(max|K_i|))
-    static const char * mode_env = getenv("TURBO_INNERQ_MODE");
+    static const char * mode_env = getenv("RQ_INNERQ_MODE");
     int mode = mode_env ? atoi(mode_env) : 0;
 
-    static const char * strength_env = getenv("TURBO_INNERQ_STRENGTH");
+    static const char * strength_env = getenv("RQ_INNERQ_STRENGTH");
     float strength = strength_env ? atof(strength_env) : 0.5f;
     float max_clamp = 2.0f;
 
@@ -212,7 +212,7 @@ static void turbo_innerq_finalize_calibration() {
         for (int i = 0; i < 128; i++) ones[i] = 1.0f;
         cudaMemcpyToSymbol(d_innerq_channel_scale, ones, sizeof(ones));
         cudaMemcpyToSymbol(d_innerq_channel_scale_inv, ones, sizeof(ones));
-        turbo_innerq_update_fattn_scales(ones);
+        rq_innerq_update_fattn_scales(ones);
         return;
     }
 
@@ -234,49 +234,49 @@ static void turbo_innerq_finalize_calibration() {
 
     cudaMemcpyToSymbol(d_innerq_channel_scale, scale, sizeof(scale));
     cudaMemcpyToSymbol(d_innerq_channel_scale_inv, scale_inv, sizeof(scale_inv));
-    turbo_innerq_update_fattn_scales(scale_inv);
+    rq_innerq_update_fattn_scales(scale_inv);
 }
 
 // === Shared constants ===
-static __constant__ float d_turbo_centroids_3bit[8] = {
+static __constant__ float d_rq_centroids_3bit[8] = {
     -0.190685f, -0.117832f, -0.065717f, -0.021460f,
      0.021460f,  0.065717f,  0.117832f,  0.190685f
 };
-static __constant__ float d_turbo_mid_3bit[7] = {
+static __constant__ float d_rq_mid_3bit[7] = {
     -0.154259f, -0.091775f, -0.043589f, 0.0f, 0.043589f, 0.091775f, 0.154259f
 };
 
-// === TURBO2: 2-bit codebook (Lloyd-Max for N(0, 1/128)) ===
-static __constant__ float d_turbo_centroids_2bit[4] = {
+// === RQ2: 2-bit codebook (Lloyd-Max for N(0, 1/128)) ===
+static __constant__ float d_rq_centroids_2bit[4] = {
     -0.133462f, -0.039994f, 0.039994f, 0.133462f
 };
-static __constant__ float d_turbo_mid_2bit[3] = {
+static __constant__ float d_rq_mid_2bit[3] = {
     -0.086728f, 0.0f, 0.086728f
 };
 
-// === TURBO4: 4-bit codebook (Lloyd-Max for N(0, 1/sqrt(128))) ===
-static __constant__ float d_turbo_centroids_4bit[16] = {
+// === RQ4: 4-bit codebook (Lloyd-Max for N(0, 1/sqrt(128))) ===
+static __constant__ float d_rq_centroids_4bit[16] = {
     -0.241556f, -0.182907f, -0.143047f, -0.111065f,
     -0.083317f, -0.058069f, -0.034311f, -0.011353f,
      0.011353f,  0.034311f,  0.058069f,  0.083317f,
      0.111065f,  0.143047f,  0.182907f,  0.241556f,
 };
-static __constant__ float d_turbo_mid_4bit[15] = {
+static __constant__ float d_rq_mid_4bit[15] = {
     -0.212232f, -0.162977f, -0.127056f, -0.097191f, -0.070693f,
     -0.046190f, -0.022832f,  0.000000f,  0.022832f,  0.046190f,
      0.070693f,  0.097191f,  0.127056f,  0.162977f,  0.212232f,
 };
 
-// === FWHT rotation sign arrays (from turbo-wht.h, seed=42 rotation, seed=1042 QJL) ===
-static __constant__ float d_turbo_wht_signs1[128] = {
+// === FWHT rotation sign arrays (from rq-rotate.h, seed=42 rotation, seed=1042 QJL) ===
+static __constant__ float d_rq_wht_signs1[128] = {
     -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f};
-static __constant__ float d_turbo_wht_signs2[128] = {
+static __constant__ float d_rq_wht_signs2[128] = {
     1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f};
-// QJL sign arrays removed — turbo4 now uses pure 4-bit PolarQuant (no QJL correction)
+// QJL sign arrays removed — rq4 now uses pure 4-bit PolarQuant (no QJL correction)
 
 // === FWHT rotation functions ===
 static __device__ __forceinline__
-void turbo_fwht_128_cuda(float * x) {
+void rq_fwht_128_cuda(float * x) {
     for (int h = 1; h < 128; h *= 2) {
         for (int i = 0; i < 128; i += h * 2) {
             for (int j = i; j < i + h; j++) {
@@ -291,63 +291,63 @@ void turbo_fwht_128_cuda(float * x) {
 
 // Forward rotation: signs1 → FWHT → signs2
 static __device__ __forceinline__
-void turbo_rotate_forward_cuda(float * x, const float * s1, const float * s2) {
+void rq_rotate_forward_cuda(float * x, const float * s1, const float * s2) {
     for (int i = 0; i < 128; i++) x[i] *= s1[i];
-    turbo_fwht_128_cuda(x);
+    rq_fwht_128_cuda(x);
     for (int i = 0; i < 128; i++) x[i] *= s2[i];
 }
 
 static __device__ __forceinline__
-uint8_t turbo_find_nearest_3bit(float val) {
-    if      (val < d_turbo_mid_3bit[0]) return 0;
-    else if (val < d_turbo_mid_3bit[1]) return 1;
-    else if (val < d_turbo_mid_3bit[2]) return 2;
-    else if (val < d_turbo_mid_3bit[3]) return 3;
-    else if (val < d_turbo_mid_3bit[4]) return 4;
-    else if (val < d_turbo_mid_3bit[5]) return 5;
-    else if (val < d_turbo_mid_3bit[6]) return 6;
+uint8_t rq_find_nearest_3bit(float val) {
+    if      (val < d_rq_mid_3bit[0]) return 0;
+    else if (val < d_rq_mid_3bit[1]) return 1;
+    else if (val < d_rq_mid_3bit[2]) return 2;
+    else if (val < d_rq_mid_3bit[3]) return 3;
+    else if (val < d_rq_mid_3bit[4]) return 4;
+    else if (val < d_rq_mid_3bit[5]) return 5;
+    else if (val < d_rq_mid_3bit[6]) return 6;
     else                                return 7;
 }
 
 static __device__ __forceinline__
-uint8_t turbo_find_nearest_4bit(float val) {
+uint8_t rq_find_nearest_4bit(float val) {
     // Binary search over 15 midpoints for 16 centroids
-    if (val < d_turbo_mid_4bit[7]) {
-        if (val < d_turbo_mid_4bit[3]) {
-            if (val < d_turbo_mid_4bit[1]) {
-                return val < d_turbo_mid_4bit[0] ? 0 : 1;
+    if (val < d_rq_mid_4bit[7]) {
+        if (val < d_rq_mid_4bit[3]) {
+            if (val < d_rq_mid_4bit[1]) {
+                return val < d_rq_mid_4bit[0] ? 0 : 1;
             } else {
-                return val < d_turbo_mid_4bit[2] ? 2 : 3;
+                return val < d_rq_mid_4bit[2] ? 2 : 3;
             }
         } else {
-            if (val < d_turbo_mid_4bit[5]) {
-                return val < d_turbo_mid_4bit[4] ? 4 : 5;
+            if (val < d_rq_mid_4bit[5]) {
+                return val < d_rq_mid_4bit[4] ? 4 : 5;
             } else {
-                return val < d_turbo_mid_4bit[6] ? 6 : 7;
+                return val < d_rq_mid_4bit[6] ? 6 : 7;
             }
         }
     } else {
-        if (val < d_turbo_mid_4bit[11]) {
-            if (val < d_turbo_mid_4bit[9]) {
-                return val < d_turbo_mid_4bit[8] ? 8 : 9;
+        if (val < d_rq_mid_4bit[11]) {
+            if (val < d_rq_mid_4bit[9]) {
+                return val < d_rq_mid_4bit[8] ? 8 : 9;
             } else {
-                return val < d_turbo_mid_4bit[10] ? 10 : 11;
+                return val < d_rq_mid_4bit[10] ? 10 : 11;
             }
         } else {
-            if (val < d_turbo_mid_4bit[13]) {
-                return val < d_turbo_mid_4bit[12] ? 12 : 13;
+            if (val < d_rq_mid_4bit[13]) {
+                return val < d_rq_mid_4bit[12] ? 12 : 13;
             } else {
-                return val < d_turbo_mid_4bit[14] ? 14 : 15;
+                return val < d_rq_mid_4bit[14] ? 14 : 15;
             }
         }
     }
 }
 
-// === TURBO3: SET_ROWS kernel ===
+// === RQ3: SET_ROWS kernel ===
 template<typename idx_t>
-static __global__ void k_set_rows_turbo3(
+static __global__ void k_set_rows_rq3(
         const float * __restrict__ src0, const idx_t * __restrict__ src1,
-        block_turbo3_0 * __restrict__ dst, const int64_t ne_total_groups,
+        block_rq3_0 * __restrict__ dst, const int64_t ne_total_groups,
         const int64_t ne00, const int64_t ne01, const int64_t ne02,
         const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t ne13,
         const int64_t s01, const int64_t s02, const int64_t s03,
@@ -358,7 +358,7 @@ static __global__ void k_set_rows_turbo3(
         const uint3 ne11_fd, const uint3 ne12_fd) {
     const int64_t i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x;
     if (i >= ne_total_groups) return;
-    const int64_t i_base = i * QK_TURBO3_GROUP;
+    const int64_t i_base = i * QK_RQ3_GROUP;
     uint32_t tmp = (uint32_t)i_base; uint2 div_mod;
     div_mod = fast_div_modulo(tmp, ne00_fd); const int64_t i00 = div_mod.y; tmp = div_mod.x;
     div_mod = fast_div_modulo(tmp, ne01_fd); const int64_t i01 = div_mod.y; tmp = div_mod.x;
@@ -367,9 +367,9 @@ static __global__ void k_set_rows_turbo3(
     const int64_t i11 = fastmodulo((uint32_t)i02, ne11_fd);
     const int64_t dst_row = *(src1 + i01*s10 + i11*s11 + i12*s12);
     const float * grp_src = src0 + i01*s01 + i02*s02 + i03*s03 + i00;
-    block_turbo3_0 * dst_row_ptr = (block_turbo3_0 *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3);
-    const int grp_idx = i00 / QK_TURBO3_GROUP;
-    const int blocks_per_group = QK_TURBO3_GROUP / QK_TURBO3;
+    block_rq3_0 * dst_row_ptr = (block_rq3_0 *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3);
+    const int grp_idx = i00 / QK_RQ3_GROUP;
+    const int blocks_per_group = QK_RQ3_GROUP / QK_RQ3;
     float x[128]; float norm_sq = 0.0f;
     for (int j = 0; j < 128; j++) { x[j] = grp_src[j]; norm_sq += x[j] * x[j]; }
     // InnerQ: calibrate from both K and V, apply scaling to both
@@ -394,21 +394,21 @@ static __global__ void k_set_rows_turbo3(
     float grp_norm = sqrtf(norm_sq);
     float inv_norm = grp_norm > 1e-10f ? 1.0f / grp_norm : 0.0f;
     for (int j = 0; j < 128; j++) x[j] *= inv_norm;
-    turbo_rotate_forward_cuda(x, d_turbo_wht_signs1, d_turbo_wht_signs2);
+    rq_rotate_forward_cuda(x, d_rq_wht_signs1, d_rq_wht_signs2);
     // Post-rotation extraction (if enabled)
-    turbo_extract_append(x);
+    rq_extract_append(x);
     // Quantize and accumulate reconstruction norm for correction
     float recon_norm_sq = 0.0f;
     for (int b = 0; b < blocks_per_group; b++) {
-        block_turbo3_0 & blk = dst_row_ptr[grp_idx * blocks_per_group + b];
-        const int off = b * QK_TURBO3;
-        for (int j = 0; j < QK_TURBO3 / 4; j++) blk.qs[j] = 0;
-        for (int j = 0; j < QK_TURBO3 / 8; j++) blk.signs[j] = 0;
-        for (int j = 0; j < QK_TURBO3; j++) {
-            uint8_t idx = turbo_find_nearest_3bit(x[off + j]);
+        block_rq3_0 & blk = dst_row_ptr[grp_idx * blocks_per_group + b];
+        const int off = b * QK_RQ3;
+        for (int j = 0; j < QK_RQ3 / 4; j++) blk.qs[j] = 0;
+        for (int j = 0; j < QK_RQ3 / 8; j++) blk.signs[j] = 0;
+        for (int j = 0; j < QK_RQ3; j++) {
+            uint8_t idx = rq_find_nearest_3bit(x[off + j]);
             blk.qs[j / 4] |= (idx & 0x3) << ((j % 4) * 2);
             if (idx & 0x4) blk.signs[j / 8] |= (1 << (j % 8));
-            float c = d_turbo_centroids_3bit[idx];
+            float c = d_rq_centroids_3bit[idx];
             recon_norm_sq += c * c;
         }
     }
@@ -420,29 +420,29 @@ static __global__ void k_set_rows_turbo3(
     }
 }
 
-// === TURBO3: GET_ROWS dequantize ===
-#define QR_TURBO3_0 2
+// === RQ3: GET_ROWS dequantize ===
+#define QR_RQ3_0 2
 static __device__ __forceinline__
-void dequantize_turbo3_0(const void * vx, const int64_t ib, const int iqs, float2 & v) {
-    const block_turbo3_0 * x = (const block_turbo3_0 *)vx;
+void dequantize_rq3_0(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_rq3_0 * x = (const block_rq3_0 *)vx;
     const float norm = __half2float(x[ib].norm);
     { const int j = iqs;
       const uint8_t low2 = (x[ib].qs[j/4] >> ((j%4)*2)) & 0x3;
       const uint8_t hi1  = (x[ib].signs[j/8] >> (j%8)) & 0x1;
-      v.x = d_turbo_centroids_3bit[low2 | (hi1 << 2)] * norm; }
+      v.x = d_rq_centroids_3bit[low2 | (hi1 << 2)] * norm; }
     { const int j = iqs + 16;
       const uint8_t low2 = (x[ib].qs[j/4] >> ((j%4)*2)) & 0x3;
       const uint8_t hi1  = (x[ib].signs[j/8] >> (j%8)) & 0x1;
-      v.y = d_turbo_centroids_3bit[low2 | (hi1 << 2)] * norm; }
+      v.y = d_rq_centroids_3bit[low2 | (hi1 << 2)] * norm; }
 }
 
-// Temperature scaling for turbo4. KLD-optimal: α=1.0 (any scaling hurts KLD).
-// Override via TURBO4_ALPHA env var.
-static __constant__ float d_turbo4_alpha = 1.0f;
+// Temperature scaling for rq4. KLD-optimal: α=1.0 (any scaling hurts KLD).
+// Override via RQ4_ALPHA env var.
+static __constant__ float d_rq4_alpha = 1.0f;
 
-// === TURBO4: SET_ROWS quantize (4-bit PolarQuant, no QJL) ===
+// === RQ4: SET_ROWS quantize (4-bit PolarQuant, no QJL) ===
 static __device__ __forceinline__
-void quantize_f32_turbo4_0_block(const float * src, block_turbo4_0 * dst) {
+void quantize_f32_rq4_0_block(const float * src, block_rq4_0 * dst) {
     float norm_sq = 0.0f;
     for (int j = 0; j < 128; j++) norm_sq += src[j] * src[j];
     float norm = sqrtf(norm_sq);
@@ -450,55 +450,55 @@ void quantize_f32_turbo4_0_block(const float * src, block_turbo4_0 * dst) {
     float x[128];
     for (int j = 0; j < 128; j++) x[j] = src[j] * inv_norm;
     // Forward FWHT rotation before quantization
-    turbo_rotate_forward_cuda(x, d_turbo_wht_signs1, d_turbo_wht_signs2);
+    rq_rotate_forward_cuda(x, d_rq_wht_signs1, d_rq_wht_signs2);
     // Post-rotation extraction (if enabled)
-    turbo_extract_append(x);
+    rq_extract_append(x);
     // 4-bit quantization: find nearest of 16 centroids, pack 2 per byte
     for (int j = 0; j < 128; j += 2) {
-        uint8_t idx0 = turbo_find_nearest_4bit(x[j]);
-        uint8_t idx1 = turbo_find_nearest_4bit(x[j + 1]);
+        uint8_t idx0 = rq_find_nearest_4bit(x[j]);
+        uint8_t idx1 = rq_find_nearest_4bit(x[j + 1]);
         dst->qs[j / 2] = (idx1 << 4) | idx0;
     }
     // Norm correction: compute reconstruction norm in rotated space
     float recon_sq = 0.0f;
     for (int j = 0; j < 128; j++) {
         uint8_t idx = (j & 1) ? (dst->qs[j / 2] >> 4) : (dst->qs[j / 2] & 0xF);
-        float r = d_turbo_centroids_4bit[idx];
+        float r = d_rq_centroids_4bit[idx];
         recon_sq += r * r;
     }
     float recon_norm = sqrtf(recon_sq);
     float corrected = (recon_norm > 1e-10f) ? norm / recon_norm : norm;
-    dst->norm = __float2half(corrected * d_turbo4_alpha);
+    dst->norm = __float2half(corrected * d_rq4_alpha);
 }
 
-// === TURBO4: GET_ROWS dequantize ===
-#define QR_TURBO4_0 2
+// === RQ4: GET_ROWS dequantize ===
+#define QR_RQ4_0 2
 static __device__ __forceinline__
-void dequantize_turbo4_0(const void * vx, const int64_t ib, const int iqs, float2 & v) {
-    const block_turbo4_0 * x = (const block_turbo4_0 *)vx;
+void dequantize_rq4_0(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_rq4_0 * x = (const block_rq4_0 *)vx;
     const float norm = __half2float(x[ib].norm);
     { const int j = iqs;
       uint8_t idx = (j & 1) ? (x[ib].qs[j / 2] >> 4) : (x[ib].qs[j / 2] & 0xF);
-      v.x = d_turbo_centroids_4bit[idx] * norm; }
+      v.x = d_rq_centroids_4bit[idx] * norm; }
     { const int j = iqs + 64;
       uint8_t idx = (j & 1) ? (x[ib].qs[j / 2] >> 4) : (x[ib].qs[j / 2] & 0xF);
-      v.y = d_turbo_centroids_4bit[idx] * norm; }
+      v.y = d_rq_centroids_4bit[idx] * norm; }
 }
 
-// === TURBO2: find nearest 2-bit centroid ===
+// === RQ2: find nearest 2-bit centroid ===
 static __device__ __forceinline__
-uint8_t turbo_find_nearest_2bit(float val) {
-    if      (val < d_turbo_mid_2bit[0]) return 0;
-    else if (val < d_turbo_mid_2bit[1]) return 1;
-    else if (val < d_turbo_mid_2bit[2]) return 2;
+uint8_t rq_find_nearest_2bit(float val) {
+    if      (val < d_rq_mid_2bit[0]) return 0;
+    else if (val < d_rq_mid_2bit[1]) return 1;
+    else if (val < d_rq_mid_2bit[2]) return 2;
     else                                return 3;
 }
 
-// === TURBO2: SET_ROWS kernel ===
+// === RQ2: SET_ROWS kernel ===
 template<typename idx_t>
-static __global__ void k_set_rows_turbo2(
+static __global__ void k_set_rows_rq2(
         const float * __restrict__ src0, const idx_t * __restrict__ src1,
-        block_turbo2_0 * __restrict__ dst, const int64_t ne_total_groups,
+        block_rq2_0 * __restrict__ dst, const int64_t ne_total_groups,
         const int64_t ne00, const int64_t ne01, const int64_t ne02,
         const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t ne13,
         const int64_t s01, const int64_t s02, const int64_t s03,
@@ -508,7 +508,7 @@ static __global__ void k_set_rows_turbo2(
         const uint3 ne11_fd, const uint3 ne12_fd) {
     const int64_t i = int64_t(blockDim.x) * blockIdx.x + threadIdx.x;
     if (i >= ne_total_groups) return;
-    const int64_t i_base = i * QK_TURBO2_GROUP;
+    const int64_t i_base = i * QK_RQ2_GROUP;
     uint32_t tmp = (uint32_t)i_base; uint2 div_mod;
     div_mod = fast_div_modulo(tmp, ne00_fd); const int64_t i00 = div_mod.y; tmp = div_mod.x;
     div_mod = fast_div_modulo(tmp, ne01_fd); const int64_t i01 = div_mod.y; tmp = div_mod.x;
@@ -517,24 +517,24 @@ static __global__ void k_set_rows_turbo2(
     const int64_t i11 = fastmodulo((uint32_t)i02, ne11_fd);
     const int64_t dst_row = *(src1 + i01*s10 + i11*s11 + i12*s12);
     const float * grp_src = src0 + i01*s01 + i02*s02 + i03*s03 + i00;
-    block_turbo2_0 * dst_row_ptr = (block_turbo2_0 *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3);
-    const int grp_idx = i00 / QK_TURBO2_GROUP;
-    const int blocks_per_group = QK_TURBO2_GROUP / QK_TURBO2;
+    block_rq2_0 * dst_row_ptr = (block_rq2_0 *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3);
+    const int grp_idx = i00 / QK_RQ2_GROUP;
+    const int blocks_per_group = QK_RQ2_GROUP / QK_RQ2;
     float x[128]; float norm_sq = 0.0f;
     for (int j = 0; j < 128; j++) { x[j] = grp_src[j]; norm_sq += x[j] * x[j]; }
     float grp_norm = sqrtf(norm_sq);
     float inv_norm = grp_norm > 1e-10f ? 1.0f / grp_norm : 0.0f;
     for (int j = 0; j < 128; j++) x[j] *= inv_norm;
-    turbo_rotate_forward_cuda(x, d_turbo_wht_signs1, d_turbo_wht_signs2);
+    rq_rotate_forward_cuda(x, d_rq_wht_signs1, d_rq_wht_signs2);
     float recon_norm_sq = 0.0f;
     for (int b = 0; b < blocks_per_group; b++) {
-        block_turbo2_0 & blk = dst_row_ptr[grp_idx * blocks_per_group + b];
-        const int off = b * QK_TURBO2;
-        for (int j = 0; j < QK_TURBO2 / 4; j++) blk.qs[j] = 0;
-        for (int j = 0; j < QK_TURBO2; j++) {
-            uint8_t idx = turbo_find_nearest_2bit(x[off + j]);
+        block_rq2_0 & blk = dst_row_ptr[grp_idx * blocks_per_group + b];
+        const int off = b * QK_RQ2;
+        for (int j = 0; j < QK_RQ2 / 4; j++) blk.qs[j] = 0;
+        for (int j = 0; j < QK_RQ2; j++) {
+            uint8_t idx = rq_find_nearest_2bit(x[off + j]);
             blk.qs[j / 4] |= (idx & 0x3) << ((j % 4) * 2);
-            float c = d_turbo_centroids_2bit[idx];
+            float c = d_rq_centroids_2bit[idx];
             recon_norm_sq += c * c;
         }
     }
@@ -545,23 +545,23 @@ static __global__ void k_set_rows_turbo2(
     }
 }
 
-// === TURBO2: GET_ROWS dequantize ===
-#define QR_TURBO2_0 2
+// === RQ2: GET_ROWS dequantize ===
+#define QR_RQ2_0 2
 static __device__ __forceinline__
-void dequantize_turbo2_0(const void * vx, const int64_t ib, const int iqs, float2 & v) {
-    const block_turbo2_0 * x = (const block_turbo2_0 *)vx;
+void dequantize_rq2_0(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_rq2_0 * x = (const block_rq2_0 *)vx;
     const float norm = __half2float(x[ib].norm);
     { const int j = iqs;
       const uint8_t idx = (x[ib].qs[j/4] >> ((j%4)*2)) & 0x3;
-      v.x = d_turbo_centroids_2bit[idx] * norm; }
+      v.x = d_rq_centroids_2bit[idx] * norm; }
     { const int j = iqs + 16;
       const uint8_t idx = (x[ib].qs[j/4] >> ((j%4)*2)) & 0x3;
-      v.y = d_turbo_centroids_2bit[idx] * norm; }
+      v.y = d_rq_centroids_2bit[idx] * norm; }
 }
 
 // 3-bit TCQ codebook (product_mono/iter080, 512-state bitshift trellis). If you copy these, credit spiritbuun!
 // CUDA GLA product-aware training, 100 iters on Qwen3.5-27B FWHT-rotated KV activations. Decode: state_t = read_9_bits(qs, t*3)
-static __constant__ float d_turbo3_tcq_codebook[512] = {
+static __constant__ float d_rq3_iso_codebook[512] = {
     -0.14559399f, -0.09062801f, -0.054925077f, -0.03699251f, -0.006363985f, +0.026264573f, +0.067378916f, +0.121981815f,
     -0.18648055f, -0.106522456f, -0.052047577f, -0.011695214f, +0.021953275f, +0.059698727f, +0.09831437f, +0.16083933f,
     -0.16390342f, -0.12639847f, -0.09513180f, -0.05938352f, -0.028396897f, +0.005973862f, +0.049104784f, +0.11334257f,
@@ -629,7 +629,7 @@ static __constant__ float d_turbo3_tcq_codebook[512] = {
 };
 
 // TCQ norm alpha: K alpha = 1.0 (no scaling), V alpha = 1.04 (optimal at 2K context).
-// Override via TURBO_TCQ_ALPHA (K) and TURBO_TCQ_ALPHA_V (V) env vars.
+// Override via RQ_ISO_ALPHA (K) and RQ_ISO_ALPHA_V (V) env vars.
 // Alpha is applied at encode time (baked into fp16 norm) — this outperforms decode-time application.
 static __constant__ float d_tcq_norm_alpha = 1.0f;
 static __constant__ float d_tcq_norm_alpha_v = 1.04f;
@@ -638,9 +638,9 @@ static __constant__ float d_tcq_norm_alpha_v = 1.04f;
 // 512 threads per block (one per trellis state), one block per 128-element group
 // Double-buffered cost arrays + global memory backtrace (128 syncs/group, was 384)
 template<typename idx_t>
-static __global__ void __launch_bounds__(512, 1) k_set_rows_turbo3_tcq(
+static __global__ void __launch_bounds__(512, 1) k_set_rows_rq3_iso(
         const float * __restrict__ src0, const idx_t * __restrict__ src1,
-        block_turbo3_tcq * __restrict__ dst, const int64_t ne_total_groups,
+        block_rq3_iso * __restrict__ dst, const int64_t ne_total_groups,
         uint8_t * __restrict__ bt_buf,
         const int64_t ne00, const int64_t ne01, const int64_t ne02,
         const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t ne13,
@@ -656,8 +656,8 @@ static __global__ void __launch_bounds__(512, 1) k_set_rows_turbo3_tcq(
 
     const int sid = threadIdx.x; // state index 0..511
 
-    // Compute source and destination pointers (same index math as turbo3)
-    const int64_t i_base = group * QK_TURBO3_TCQ;
+    // Compute source and destination pointers (same index math as rq3)
+    const int64_t i_base = group * QK_RQ3_ISO;
     uint32_t tmp = (uint32_t)i_base; uint2 div_mod;
     div_mod = fast_div_modulo(tmp, ne00_fd); const int64_t i00 = div_mod.y; tmp = div_mod.x;
     div_mod = fast_div_modulo(tmp, ne01_fd); const int64_t i01 = div_mod.y; tmp = div_mod.x;
@@ -666,8 +666,8 @@ static __global__ void __launch_bounds__(512, 1) k_set_rows_turbo3_tcq(
     const int64_t i11 = fastmodulo((uint32_t)i02, ne11_fd);
     const int64_t dst_row = *(src1 + i01*s10 + i11*s11 + i12*s12);
     const float * grp_src = src0 + i01*s01 + i02*s02 + i03*s03 + i00;
-    block_turbo3_tcq * dst_blk = (block_turbo3_tcq *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3)
-                                  + (i00 / QK_TURBO3_TCQ);
+    block_rq3_iso * dst_blk = (block_rq3_iso *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3)
+                                  + (i00 / QK_RQ3_ISO);
 
     // Shared memory layout (~5KB, was ~35KB before global bt optimization):
     // x[128]     : rotated+normalized input (also reused as outputs[] after Viterbi)
@@ -724,7 +724,7 @@ static __global__ void __launch_bounds__(512, 1) k_set_rows_turbo3_tcq(
     __syncthreads();
 
     // FWHT
-    if (sid < 128) x[sid] *= d_turbo_wht_signs1[sid];
+    if (sid < 128) x[sid] *= d_rq_wht_signs1[sid];
     __syncthreads();
     for (int h = 1; h < 128; h *= 2) {
         if (sid < 64) {
@@ -735,10 +735,10 @@ static __global__ void __launch_bounds__(512, 1) k_set_rows_turbo3_tcq(
         __syncthreads();
     }
     constexpr float inv_sqrt_128 = 0.08838834764831845f;
-    if (sid < 128) x[sid] *= inv_sqrt_128 * d_turbo_wht_signs2[sid];
+    if (sid < 128) x[sid] *= inv_sqrt_128 * d_rq_wht_signs2[sid];
     __syncthreads();
 
-    if (sid == 0) turbo_extract_append(x);
+    if (sid == 0) rq_extract_append(x);
     if (sid == 0) cost[0] = grp_norm;
     __syncthreads();
 
@@ -760,7 +760,7 @@ static __global__ void __launch_bounds__(512, 1) k_set_rows_turbo3_tcq(
         // Right-shift trellis: ns = (prev >> 3) | (out << 6)
         // Predecessors of sid: prev = ((sid & 0x3F) << 3) | p, for p = 0..7
         int base_prev = (sid & 0x3F) << 3;
-        float dist = xt - d_turbo3_tcq_codebook[sid];
+        float dist = xt - d_rq3_iso_codebook[sid];
         dist = dist * dist;
 
         float best = 1e30f;
@@ -839,7 +839,7 @@ static __global__ void __launch_bounds__(512, 1) k_set_rows_turbo3_tcq(
                       | (((int)outputs[sid - 1] & 0x7) << 3)
                       | (((int)outputs[sid]     & 0x7) << 6);
         }
-        float c = d_turbo3_tcq_codebook[cur_state];
+        float c = d_rq3_iso_codebook[cur_state];
         my_recon_sq = c * c;
     }
     cost[sid] = my_recon_sq;
@@ -879,10 +879,10 @@ static __global__ void __launch_bounds__(512, 1) k_set_rows_turbo3_tcq(
 }
 
 // TCQ GET_ROWS dequantize (for non-FA paths)
-#define QR_TURBO3_TCQ 2
+#define QR_RQ3_ISO 2
 static __device__ __forceinline__
-void dequantize_turbo3_tcq(const void * vx, const int64_t ib, const int iqs, float2 & v) {
-    const block_turbo3_tcq * blk = (const block_turbo3_tcq *)vx + ib;
+void dequantize_rq3_iso(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_rq3_iso * blk = (const block_rq3_iso *)vx + ib;
     const float norm = __half2float(blk->norm);
 
     // Decode element iqs
@@ -893,7 +893,7 @@ void dequantize_turbo3_tcq(const void * vx, const int64_t ib, const int iqs, flo
         const int bit_off = bit_pos % 8;
         const uint16_t raw = (uint16_t)blk->qs[byte_idx] | ((uint16_t)blk->qs[byte_idx + 1] << 8);
         const int state = (raw >> bit_off) & 0x1FF;
-        v.x = d_turbo3_tcq_codebook[state] * norm;
+        v.x = d_rq3_iso_codebook[state] * norm;
     }
     // Decode element iqs + 64 (stride = half block size)
     {
@@ -903,17 +903,17 @@ void dequantize_turbo3_tcq(const void * vx, const int64_t ib, const int iqs, flo
         const int bit_off = bit_pos % 8;
         const uint16_t raw = (uint16_t)blk->qs[byte_idx] | ((uint16_t)blk->qs[byte_idx + 1] << 8);
         const int state = (raw >> bit_off) & 0x1FF;
-        v.y = d_turbo3_tcq_codebook[state] * norm;
+        v.y = d_rq3_iso_codebook[state] * norm;
     }
 }
 
 // =====================================================================================
-// TURBO2_TCQ: 2-bit Trellis-Coded Quantization (k=2, L=8, 256 states, free initial state)
+// RQ4_ISO: 2-bit Trellis-Coded Quantization (k=2, L=8, 256 states, free initial state)
 // =====================================================================================
 
 // 2-bit TCQ codebook (product_mono/iter090, 256-state bitshift trellis). If you copy these, credit spiritbuun!
 // CUDA GLA product-aware training, 100 iters on Qwen3.5-27B FWHT-rotated KV activations. Decode: state_t = read_8_bits(qs, t*2)
-static __constant__ float d_turbo2_tcq_codebook[256] = {
+static __constant__ float d_rq4_iso_codebook[256] = {
     -0.18030643f, -0.11009848f, -0.04742626f, +0.02894132f, -0.10523465f, -0.031312924f, +0.031491395f, +0.12263535f,
     -0.15660362f, -0.055477407f, +0.0046675834f, +0.06166081f, -0.07506216f, -0.016963918f, +0.043737844f, +0.116496615f,
     -0.08632783f, -0.022493735f, +0.041032985f, +0.10660284f, -0.06274858f, -0.0036939639f, +0.02095157f, +0.07539709f,
@@ -951,9 +951,9 @@ static __constant__ float d_turbo2_tcq_codebook[256] = {
 // 2-bit TCQ SET_ROWS encode: Viterbi optimal path with right-shift trellis (k=2, L=8)
 // Double-buffered cost arrays + global memory backtrace (128 syncs/group, was 384)
 template<typename idx_t>
-static __global__ void __launch_bounds__(256, 1) k_set_rows_turbo2_tcq(
+static __global__ void __launch_bounds__(256, 1) k_set_rows_rq4_iso(
         const float * __restrict__ src0, const idx_t * __restrict__ src1,
-        block_turbo2_tcq * __restrict__ dst, const int64_t ne_total_groups,
+        block_rq4_iso * __restrict__ dst, const int64_t ne_total_groups,
         uint8_t * __restrict__ bt_buf,
         const int64_t ne00, const int64_t ne01, const int64_t ne02,
         const int64_t ne10, const int64_t ne11, const int64_t ne12, const int64_t ne13,
@@ -969,7 +969,7 @@ static __global__ void __launch_bounds__(256, 1) k_set_rows_turbo2_tcq(
     const int sid = threadIdx.x; // 0..255 = trellis state
 
     // Compute source and destination pointers (all threads, used by thread 0)
-    const int64_t i_base = int64_t(grp) * QK_TURBO2_TCQ;
+    const int64_t i_base = int64_t(grp) * QK_RQ4_ISO;
     uint32_t tmp = (uint32_t)i_base; uint2 div_mod;
     div_mod = fast_div_modulo(tmp, ne00_fd); const int64_t i00 = div_mod.y; tmp = div_mod.x;
     div_mod = fast_div_modulo(tmp, ne01_fd); const int64_t i01 = div_mod.y; tmp = div_mod.x;
@@ -978,8 +978,8 @@ static __global__ void __launch_bounds__(256, 1) k_set_rows_turbo2_tcq(
     const int64_t i11 = fastmodulo((uint32_t)i02, ne11_fd);
     const int64_t dst_row = *(src1 + i01*s10 + i11*s11 + i12*s12);
     const float * grp_src = src0 + i01*s01 + i02*s02 + i03*s03 + i00;
-    block_turbo2_tcq * dst_blk = (block_turbo2_tcq *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3)
-                               + (i00 / QK_TURBO2_TCQ);
+    block_rq4_iso * dst_blk = (block_rq4_iso *)((char *)dst + dst_row*s1 + i02*s2 + i03*s3)
+                               + (i00 / QK_RQ4_ISO);
 
     __shared__ float x[128];
     __shared__ float cost[256];
@@ -1030,7 +1030,7 @@ static __global__ void __launch_bounds__(256, 1) k_set_rows_turbo2_tcq(
     __syncthreads();
 
     // FWHT
-    if (sid < 128) x[sid] *= d_turbo_wht_signs1[sid];
+    if (sid < 128) x[sid] *= d_rq_wht_signs1[sid];
     __syncthreads();
     for (int h = 1; h < 128; h *= 2) {
         if (sid < 64) {
@@ -1041,10 +1041,10 @@ static __global__ void __launch_bounds__(256, 1) k_set_rows_turbo2_tcq(
         __syncthreads();
     }
     constexpr float inv_sqrt_128 = 0.08838834764831845f;
-    if (sid < 128) x[sid] *= inv_sqrt_128 * d_turbo_wht_signs2[sid];
+    if (sid < 128) x[sid] *= inv_sqrt_128 * d_rq_wht_signs2[sid];
     __syncthreads();
 
-    if (sid == 0) turbo_extract_append(x);
+    if (sid == 0) rq_extract_append(x);
     if (sid == 0) cost[0] = grp_norm;
     __syncthreads();
 
@@ -1064,7 +1064,7 @@ static __global__ void __launch_bounds__(256, 1) k_set_rows_turbo2_tcq(
         // Right-shift trellis (k=2, L=8): ns = (prev >> 2) | (out << 6)
         // Predecessors of sid: prev = ((sid & 0x3F) << 2) | p, for p = 0..3
         int base_prev = (sid & 0x3F) << 2;
-        float dist = xt - d_turbo2_tcq_codebook[sid];
+        float dist = xt - d_rq4_iso_codebook[sid];
         dist = dist * dist;
 
         float best = 1e30f;
@@ -1144,7 +1144,7 @@ static __global__ void __launch_bounds__(256, 1) k_set_rows_turbo2_tcq(
                       | (((int)outputs[sid - 1] & 0x3) << 4)
                       | (((int)outputs[sid]     & 0x3) << 6);
         }
-        float c = d_turbo2_tcq_codebook[cur_state];
+        float c = d_rq4_iso_codebook[cur_state];
         my_recon_sq = c * c;
     }
     cost[sid] = my_recon_sq;
@@ -1183,10 +1183,10 @@ static __global__ void __launch_bounds__(256, 1) k_set_rows_turbo2_tcq(
 }
 
 // 2-bit TCQ GET_ROWS dequantize
-#define QR_TURBO2_TCQ 2
+#define QR_RQ4_ISO 2
 static __device__ __forceinline__
-void dequantize_turbo2_tcq(const void * vx, const int64_t ib, const int iqs, float2 & v) {
-    const block_turbo2_tcq * blk = (const block_turbo2_tcq *)vx + ib;
+void dequantize_rq4_iso(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_rq4_iso * blk = (const block_rq4_iso *)vx + ib;
     const float norm = __half2float(blk->norm);
 
     // Decode element iqs: read 8-bit state via sliding window
@@ -1197,7 +1197,7 @@ void dequantize_turbo2_tcq(const void * vx, const int64_t ib, const int iqs, flo
         const int bit_off = bit_pos % 8;
         const uint16_t raw = (uint16_t)blk->qs[byte_idx] | ((uint16_t)blk->qs[byte_idx + 1] << 8);
         const int state = (raw >> bit_off) & 0xFF;
-        v.x = d_turbo2_tcq_codebook[state] * norm;
+        v.x = d_rq4_iso_codebook[state] * norm;
     }
     // Decode element iqs + 64
     {
@@ -1207,6 +1207,6 @@ void dequantize_turbo2_tcq(const void * vx, const int64_t ib, const int iqs, flo
         const int bit_off = bit_pos % 8;
         const uint16_t raw = (uint16_t)blk->qs[byte_idx] | ((uint16_t)blk->qs[byte_idx + 1] << 8);
         const int state = (raw >> bit_off) & 0xFF;
-        v.y = d_turbo2_tcq_codebook[state] * norm;
+        v.y = d_rq4_iso_codebook[state] * norm;
     }
 }

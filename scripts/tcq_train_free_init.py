@@ -143,7 +143,7 @@ if __name__ == '__main__':
 	print(f"// MSE reduction: {reduction:.1f}% vs Lloyd-Max, {db_gain:.2f} dB")
 	print(f"// Free initial state, decode: state_t = read_9_bits(qs, t*3)")
 	print(f"// Scaled by 1/sqrt(128) = {scale:.10f}")
-	print(f"static __constant__ float d_turbo3_tcq_codebook[512] = {{")
+	print(f"static __constant__ float d_rq3_iso_codebook[512] = {{")
 	for i in range(0, 512, 8):
 		vals = ', '.join(f'{scaled[j]:+.8f}' for j in range(i, min(i+8, 512)))
 		comma = ',' if i + 8 < 512 else ''

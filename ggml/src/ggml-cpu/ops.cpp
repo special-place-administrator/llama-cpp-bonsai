@@ -10622,13 +10622,13 @@ void ggml_compute_forward_gated_delta_net(
     }
 }
 
-// ggml_compute_forward_turbo_wht
+// ggml_compute_forward_rq_rotate
 
-// WHT sign arrays (must match Metal shader turbo_wht_signs1/2)
-static const float turbo_wht_s1[128] = {-1,1,1,-1,-1,1,-1,1,-1,-1,1,1,1,1,1,1,1,-1,1,-1,1,-1,-1,1,1,1,-1,1,1,-1,-1,-1,-1,1,1,-1,1,1,-1,1,-1,1,1,-1,-1,1,-1,1,1,1,1,-1,-1,-1,-1,-1,1,-1,1,1,1,1,-1,1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,1,-1,-1,1,1,1,-1,-1,1,1,-1,1,1,-1,1,-1,-1,1,1,-1,1,-1,1,-1,1,1,1,1,-1,1,-1,1,1,-1,1,1,-1,-1,-1,-1,-1,1,1,-1,1,1,-1,1};
-static const float turbo_wht_s2[128] = {1,1,1,1,-1,1,1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,-1,-1,1,-1,1,-1,1,-1,-1,1,-1,1,1,1,1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,1,1,1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,-1,-1,-1,1,-1,1,-1,1,-1,-1,1,1,-1,1,-1,1,1,-1,1,-1,-1,-1,-1,1,-1,-1,1,-1,1,-1,1,1,1,-1,-1,1,-1,1,-1,1,1,-1,-1,1,-1,1,-1,1,1,-1,1,-1,1,-1,-1,-1,-1,-1,1,-1};
+// WHT sign arrays (must match Metal shader rq_wht_signs1/2)
+static const float rq_wht_s1[128] = {-1,1,1,-1,-1,1,-1,1,-1,-1,1,1,1,1,1,1,1,-1,1,-1,1,-1,-1,1,1,1,-1,1,1,-1,-1,-1,-1,1,1,-1,1,1,-1,1,-1,1,1,-1,-1,1,-1,1,1,1,1,-1,-1,-1,-1,-1,1,-1,1,1,1,1,-1,1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,1,-1,-1,1,1,1,-1,-1,1,1,-1,1,1,-1,1,-1,-1,1,1,-1,1,-1,1,-1,1,1,1,1,-1,1,-1,1,1,-1,1,1,-1,-1,-1,-1,-1,1,1,-1,1,1,-1,1};
+static const float rq_wht_s2[128] = {1,1,1,1,-1,1,1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,-1,-1,1,-1,1,-1,1,-1,-1,1,-1,1,1,1,1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,1,1,1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,-1,-1,-1,1,-1,1,-1,1,-1,-1,1,1,-1,1,-1,1,1,-1,1,-1,-1,-1,-1,1,-1,-1,1,-1,1,-1,1,1,1,-1,-1,1,-1,1,-1,1,1,-1,-1,1,-1,1,-1,1,1,-1,1,-1,1,-1,-1,-1,-1,-1,1,-1};
 
-static void ggml_compute_forward_turbo_wht_f32(
+static void ggml_compute_forward_rq_rotate_f32(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
     const ggml_tensor * src = dst->src[0];
@@ -10638,8 +10638,8 @@ static void ggml_compute_forward_turbo_wht_f32(
     int direction;
     memcpy(&direction, dst->op_params, sizeof(int));
 
-    const float * s_first = (direction == 0) ? turbo_wht_s1 : turbo_wht_s2;
-    const float * s_second = (direction == 0) ? turbo_wht_s2 : turbo_wht_s1;
+    const float * s_first = (direction == 0) ? rq_wht_s1 : rq_wht_s2;
+    const float * s_second = (direction == 0) ? rq_wht_s2 : rq_wht_s1;
 
     const int64_t n_total = ggml_nelements(src);
     const int64_t n_groups = n_total / 128;
@@ -10677,11 +10677,11 @@ static void ggml_compute_forward_turbo_wht_f32(
     }
 }
 
-void ggml_compute_forward_turbo_wht(
+void ggml_compute_forward_rq_rotate(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
     switch (dst->src[0]->type) {
-        case GGML_TYPE_F32: ggml_compute_forward_turbo_wht_f32(params, dst); break;
+        case GGML_TYPE_F32: ggml_compute_forward_rq_rotate_f32(params, dst); break;
         default: GGML_ABORT("fatal error");
     }
 }

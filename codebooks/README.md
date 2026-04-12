@@ -1,7 +1,7 @@
 # TCQ Codebook Binaries
 
 Raw float32 arrays. 3-bit = 512 floats (2048 bytes), 2-bit = 256 floats (1024 bytes).
-Load at runtime via `TURBO_TCQ_CB=<path>` (3-bit) or `TURBO_TCQ_CB2=<path>` (2-bit).
+Load at runtime via `RQ_ISO_CB=<path>` (3-bit) or `RQ_ISO_CB2=<path>` (2-bit).
 
 ## Best codebooks
 

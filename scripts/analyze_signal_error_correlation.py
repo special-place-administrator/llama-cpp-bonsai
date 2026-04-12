@@ -96,7 +96,7 @@ def scalar_quantize(data, centroids):
 def parse_codebook_from_file(filepath):
 	with open(filepath) as f:
 		text = f.read()
-	m = re.search(r'static __constant__ float d_turbo3_tcq_codebook\[512\] = \{\n(.*?)\};', text, re.DOTALL)
+	m = re.search(r'static __constant__ float d_rq3_iso_codebook\[512\] = \{\n(.*?)\};', text, re.DOTALL)
 	if not m:
 		return None
 	vals = []
@@ -164,7 +164,7 @@ def main():
 	# ================================================================
 	print("\nLoading post-FWHT K data...")
 	n_vec = 10000
-	k_data = np.fromfile("/tmp/turbo_postrot.bin", dtype=np.float32, count=n_vec * T).reshape(n_vec, T).astype(np.float64)
+	k_data = np.fromfile("/tmp/rq_postrot.bin", dtype=np.float32, count=n_vec * T).reshape(n_vec, T).astype(np.float64)
 	print(f"  K: {k_data.shape}, mean={np.mean(k_data):.6f}, std={np.std(k_data):.6f}")
 
 	print("Loading Q vectors...")

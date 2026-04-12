@@ -337,9 +337,9 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_gated_delta_net(ctx, idx);
             } break;
-        case GGML_OP_TURBO_WHT:
+        case GGML_OP_RQ_ROTATE:
             {
-                n_fuse = ggml_metal_op_turbo_wht(ctx, idx);
+                n_fuse = ggml_metal_op_rq_rotate(ctx, idx);
             } break;
         case GGML_OP_SOLVE_TRI:
             {
@@ -1649,7 +1649,7 @@ int ggml_metal_op_gated_delta_net(ggml_metal_op_t ctx, int idx) {
     return 1;
 }
 
-int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
+int ggml_metal_op_rq_rotate(ggml_metal_op_t ctx, int idx) {
     ggml_tensor * op = ctx->node(idx);
 
     ggml_metal_library_t lib = ctx->lib;
@@ -1661,9 +1661,9 @@ int ggml_metal_op_turbo_wht(ggml_metal_op_t ctx, int idx) {
     const int64_t n_elements = ggml_nelements(op->src[0]);
     const int64_t n_groups = n_elements / 128;
 
-    auto pipeline = ggml_metal_library_get_pipeline_turbo_wht(lib);
+    auto pipeline = ggml_metal_library_get_pipeline_rq_rotate(lib);
 
-    ggml_metal_kargs_turbo_wht args = {
+    ggml_metal_kargs_rq_rotate args = {
         /*.n_elements =*/ n_elements,
         /*.direction  =*/ direction,
     };
@@ -2955,7 +2955,7 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         // ne20*(nsg)
         // each simdgroup has a full f32 head vector in shared mem to accumulate results
         //
-// Extra 128 floats (512 bytes) for TurboQuant pre-dequantized block cache in threadgroup memory
+// Extra 128 floats (512 bytes) for RotorQuant pre-dequantized block cache in threadgroup memory
 #define FATTN_SMEM(nsg) (GGML_PAD(((GGML_PAD(ne00, 128) + 4*ncpsg + 2*GGML_PAD(ne20, 128))*(nsg))*(sizeof(float)/2) + 128*sizeof(float), 16))
 
         int64_t nsg = 1;

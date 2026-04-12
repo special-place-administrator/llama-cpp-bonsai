@@ -1,23 +1,23 @@
 #include "set-rows.cuh"
 #include "cpy-utils.cuh"
-#include "turbo-quant-cuda.cuh"
+#include "rq-quant-cuda.cuh"
 #include <cstring>
 #include <cerrno>
 
-static void load_turbo4_alpha() {
+static void load_rq4_alpha() {
     static bool loaded = false;
     if (loaded) return;
     loaded = true;
-    const char *s = getenv("TURBO4_ALPHA");
+    const char *s = getenv("RQ4_ALPHA");
     if (!s) return;
     char *end;
     errno = 0;
     float a = strtof(s, &end);
     if (end == s || errno != 0 || a <= 0.0f || a >= 10.0f) {
-        fprintf(stderr, "TURBO4: invalid TURBO4_ALPHA='%s'\n", s);
+        fprintf(stderr, "RQ4: invalid RQ4_ALPHA='%s'\n", s);
     } else {
-        cudaMemcpyToSymbol(d_turbo4_alpha, &a, sizeof(float));
-        fprintf(stderr, "TURBO4: alpha=%.3f\n", a);
+        cudaMemcpyToSymbol(d_rq4_alpha, &a, sizeof(float));
+        fprintf(stderr, "RQ4: alpha=%.3f\n", a);
     }
 }
 
@@ -27,14 +27,14 @@ static void load_tcq_norm_alpha() {
     loaded = true;
 
     // Context-adaptive decode-time alpha is the default. Force encode-time V alpha to 1.0
-    // unless TURBO_TCQ_ENCODE_ALPHA=1 is explicitly set to use encode-time alpha instead.
-    const char *encode_mode = getenv("TURBO_TCQ_ENCODE_ALPHA");
+    // unless RQ_ISO_ENCODE_ALPHA=1 is explicitly set to use encode-time alpha instead.
+    const char *encode_mode = getenv("RQ_ISO_ENCODE_ALPHA");
     if (!encode_mode) {
         float one = 1.0f;
         cudaMemcpyToSymbol(d_tcq_norm_alpha_v, &one, sizeof(float));
         fprintf(stderr, "TCQ: encode V alpha=1.0 (context-adaptive decode-time alpha active)\n");
         // Still allow K alpha override
-        const char *s = getenv("TURBO_TCQ_ALPHA");
+        const char *s = getenv("RQ_ISO_ALPHA");
         if (s) {
             char *end;
             errno = 0;
@@ -46,8 +46,8 @@ static void load_tcq_norm_alpha() {
         return;
     }
 
-    const char *s = getenv("TURBO_TCQ_ALPHA");
-    const char *sv = getenv("TURBO_TCQ_ALPHA_V");
+    const char *s = getenv("RQ_ISO_ALPHA");
+    const char *sv = getenv("RQ_ISO_ALPHA_V");
     if (!s && !sv) return;
     float alpha_k = 1.0f;
     bool k_set = false;
@@ -56,7 +56,7 @@ static void load_tcq_norm_alpha() {
         errno = 0;
         float a = strtof(s, &end);
         if (end == s || errno != 0 || a <= 0.0f || a >= 10.0f) {
-            fprintf(stderr, "TCQ: invalid TURBO_TCQ_ALPHA='%s'\n", s);
+            fprintf(stderr, "TCQ: invalid RQ_ISO_ALPHA='%s'\n", s);
         } else {
             alpha_k = a;
             k_set = true;
@@ -68,21 +68,21 @@ static void load_tcq_norm_alpha() {
         errno = 0;
         float a = strtof(sv, &end);
         if (end == sv || errno != 0 || a <= 0.0f || a >= 10.0f) {
-            fprintf(stderr, "TCQ: invalid TURBO_TCQ_ALPHA_V='%s'\n", sv);
+            fprintf(stderr, "TCQ: invalid RQ_ISO_ALPHA_V='%s'\n", sv);
         } else {
             cudaMemcpyToSymbol(d_tcq_norm_alpha_v, &a, sizeof(float));
             fprintf(stderr, "TCQ: norm alpha K=%.3f V=%.3f\n", alpha_k, a);
             return;
         }
     }
-    // TURBO_TCQ_ALPHA set but not TURBO_TCQ_ALPHA_V: V matches K for backwards compat
+    // RQ_ISO_ALPHA set but not RQ_ISO_ALPHA_V: V matches K for backwards compat
     if (k_set) {
         cudaMemcpyToSymbol(d_tcq_norm_alpha_v, &alpha_k, sizeof(float));
         fprintf(stderr, "TCQ: norm alpha K=V=%.3f\n", alpha_k);
     }
 }
 
-// TCQ error dump for autocorrelation analysis (TURBO_TCQ_DUMP_ERRORS=N)
+// TCQ error dump for autocorrelation analysis (RQ_ISO_DUMP_ERRORS=N)
 static int    tcq_dump_n = 0;
 static float * tcq_dump_x_host = nullptr;
 static uint8_t * tcq_dump_out_host = nullptr;
@@ -112,7 +112,7 @@ static void init_tcq_error_dump() {
     static bool loaded = false;
     if (loaded) return;
     loaded = true;
-    const char *s = getenv("TURBO_TCQ_DUMP_ERRORS");
+    const char *s = getenv("RQ_ISO_DUMP_ERRORS");
     if (!s) return;
     int n = atoi(s);
     if (n <= 0 || n > 500000) return;
@@ -447,9 +447,9 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             nb1, nb2, nb3,
             stream
         );
-    } else if (dst->type == GGML_TYPE_TURBO2_0) {
-        GGML_ASSERT(ne00 % QK_TURBO2_GROUP == 0);
-        const int64_t ne_total_groups = (ne00 * ne01 * ne02 * ne03) / QK_TURBO2_GROUP;
+    } else if (dst->type == GGML_TYPE_RQ2_0) {
+        GGML_ASSERT(ne00 % QK_RQ2_GROUP == 0);
+        const int64_t ne_total_groups = (ne00 * ne01 * ne02 * ne03) / QK_RQ2_GROUP;
         const int num_blocks_grid = (ne_total_groups + CUDA_SET_ROWS_BLOCK_SIZE - 1) / CUDA_SET_ROWS_BLOCK_SIZE;
         const int64_t s01_f = nb01/sizeof(float); const int64_t s02_f = nb02/sizeof(float); const int64_t s03_f = nb03/sizeof(float);
         const int64_t s10_i = nb10/sizeof(idx_t); const int64_t s11_i = nb11/sizeof(idx_t); const int64_t s12_i = nb12/sizeof(idx_t);
@@ -459,15 +459,15 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             const uint3 ne02_fd = init_fastdiv_values((uint32_t) ne02);
             const uint3 ne11_fd = init_fastdiv_values((uint32_t) ne11);
             const uint3 ne12_fd = init_fastdiv_values((uint32_t) ne12);
-            k_set_rows_turbo2<idx_t><<<num_blocks_grid, CUDA_SET_ROWS_BLOCK_SIZE, 0, stream>>>(
-                src0_d, src1_d, (block_turbo2_0 *)dst->data,
+            k_set_rows_rq2<idx_t><<<num_blocks_grid, CUDA_SET_ROWS_BLOCK_SIZE, 0, stream>>>(
+                src0_d, src1_d, (block_rq2_0 *)dst->data,
                 ne_total_groups, ne00, ne01, ne02, ne10, ne11, ne12, ne13,
                 s01_f, s02_f, s03_f, s10_i, s11_i, s12_i, nb1, nb2, nb3,
                 ne00_fd, ne01_fd, ne02_fd, ne11_fd, ne12_fd);
         }
-    } else if (dst->type == GGML_TYPE_TURBO3_0) {
-        GGML_ASSERT(ne00 % QK_TURBO3_GROUP == 0);
-        const int64_t ne_total_groups = (ne00 * ne01 * ne02 * ne03) / QK_TURBO3_GROUP;
+    } else if (dst->type == GGML_TYPE_RQ3_0) {
+        GGML_ASSERT(ne00 % QK_RQ3_GROUP == 0);
+        const int64_t ne_total_groups = (ne00 * ne01 * ne02 * ne03) / QK_RQ3_GROUP;
         const int num_blocks_grid = (ne_total_groups + CUDA_SET_ROWS_BLOCK_SIZE - 1) / CUDA_SET_ROWS_BLOCK_SIZE;
         const int64_t s01_f = nb01/sizeof(float); const int64_t s02_f = nb02/sizeof(float); const int64_t s03_f = nb03/sizeof(float);
         const int64_t s10_i = nb10/sizeof(idx_t); const int64_t s11_i = nb11/sizeof(idx_t); const int64_t s12_i = nb12/sizeof(idx_t);
@@ -478,32 +478,32 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             const uint3 ne02_fd = init_fastdiv_values((uint32_t) ne02);
             const uint3 ne11_fd = init_fastdiv_values((uint32_t) ne11);
             const uint3 ne12_fd = init_fastdiv_values((uint32_t) ne12);
-            k_set_rows_turbo3<idx_t><<<num_blocks_grid, CUDA_SET_ROWS_BLOCK_SIZE, 0, stream>>>(
-                src0_d, src1_d, (block_turbo3_0 *)dst->data,
+            k_set_rows_rq3<idx_t><<<num_blocks_grid, CUDA_SET_ROWS_BLOCK_SIZE, 0, stream>>>(
+                src0_d, src1_d, (block_rq3_0 *)dst->data,
                 ne_total_groups, ne00, ne01, ne02, ne10, ne11, ne12, ne13,
                 s01_f, s02_f, s03_f, s10_i, s11_i, s12_i, iq_is_k, nb1, nb2, nb3,
                 ne00_fd, ne01_fd, ne02_fd, ne11_fd, ne12_fd);
         }
-    } else if (dst->type == GGML_TYPE_TURBO4_0) {
-        load_turbo4_alpha();
-        set_rows_cuda_quant<idx_t, block_turbo4_0, QK_TURBO4, quantize_f32_turbo4_0_block>(
-            src0_d, src1_d, (block_turbo4_0*)dst->data,
+    } else if (dst->type == GGML_TYPE_RQ4_0) {
+        load_rq4_alpha();
+        set_rows_cuda_quant<idx_t, block_rq4_0, QK_RQ4, quantize_f32_rq4_0_block>(
+            src0_d, src1_d, (block_rq4_0*)dst->data,
             ne00, ne01, ne02, ne03, ne10, ne11, ne12, ne13,
             nb01, nb02, nb03, nb10, nb11, nb12, nb1, nb2, nb3, stream);
-    } else if (dst->type == GGML_TYPE_TURBO3_TCQ) {
-        GGML_ASSERT(ne00 % QK_TURBO3_TCQ == 0);
-        const int64_t ne_total_groups = (ne00 * ne01 * ne02 * ne03) / QK_TURBO3_TCQ;
-        // Runtime codebook loading: TURBO_TCQ_CB overrides compiled-in codebook
+    } else if (dst->type == GGML_TYPE_RQ3_ISO) {
+        GGML_ASSERT(ne00 % QK_RQ3_ISO == 0);
+        const int64_t ne_total_groups = (ne00 * ne01 * ne02 * ne03) / QK_RQ3_ISO;
+        // Runtime codebook loading: RQ_ISO_CB overrides compiled-in codebook
         static bool tcq_cb_loaded = false;
         if (!tcq_cb_loaded) {
             tcq_cb_loaded = true;
-            const char *cb_path = getenv("TURBO_TCQ_CB");
+            const char *cb_path = getenv("RQ_ISO_CB");
             if (cb_path) {
                 float cb[512];
                 FILE *f = fopen(cb_path, "rb");
                 if (f && fread(cb, sizeof(float), 512, f) == 512) {
                     fclose(f);
-                    cudaMemcpyToSymbol(d_turbo3_tcq_codebook, cb, 512*sizeof(float));
+                    cudaMemcpyToSymbol(d_rq3_iso_codebook, cb, 512*sizeof(float));
                     fprintf(stderr, "TCQ encode: loaded codebook from %s\n", cb_path);
                 } else {
                     if (f) fclose(f);
@@ -524,26 +524,26 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             const uint3 ne02_fd = init_fastdiv_values((uint32_t) ne02);
             const uint3 ne11_fd = init_fastdiv_values((uint32_t) ne11);
             const uint3 ne12_fd = init_fastdiv_values((uint32_t) ne12);
-            k_set_rows_turbo3_tcq<idx_t><<<(int)ne_total_groups, 512, 0, stream>>>(
-                src0_d, src1_d, (block_turbo3_tcq *)dst->data,
+            k_set_rows_rq3_iso<idx_t><<<(int)ne_total_groups, 512, 0, stream>>>(
+                src0_d, src1_d, (block_rq3_iso *)dst->data,
                 ne_total_groups, tcq_bt_buf, ne00, ne01, ne02, ne10, ne11, ne12, ne13,
                 s01_f, s02_f, s03_f, s10_i, s11_i, s12_i, iq_is_k, nb1, nb2, nb3,
                 ne00_fd, ne01_fd, ne02_fd, ne11_fd, ne12_fd);
         }
-    } else if (dst->type == GGML_TYPE_TURBO2_TCQ) {
-        GGML_ASSERT(ne00 % QK_TURBO2_TCQ == 0);
-        const int64_t ne_total_groups = (ne00 * ne01 * ne02 * ne03) / QK_TURBO2_TCQ;
-        // Runtime codebook loading: TURBO_TCQ_CB2 overrides compiled-in 2-bit codebook
+    } else if (dst->type == GGML_TYPE_RQ4_ISO) {
+        GGML_ASSERT(ne00 % QK_RQ4_ISO == 0);
+        const int64_t ne_total_groups = (ne00 * ne01 * ne02 * ne03) / QK_RQ4_ISO;
+        // Runtime codebook loading: RQ_ISO_CB2 overrides compiled-in 2-bit codebook
         static bool tcq2_cb_loaded = false;
         if (!tcq2_cb_loaded) {
             tcq2_cb_loaded = true;
-            const char *cb_path = getenv("TURBO_TCQ_CB2");
+            const char *cb_path = getenv("RQ_ISO_CB2");
             if (cb_path) {
                 float cb[256];
                 FILE *f = fopen(cb_path, "rb");
                 if (f && fread(cb, sizeof(float), 256, f) == 256) {
                     fclose(f);
-                    cudaMemcpyToSymbol(d_turbo2_tcq_codebook, cb, 256*sizeof(float));
+                    cudaMemcpyToSymbol(d_rq4_iso_codebook, cb, 256*sizeof(float));
                     fprintf(stderr, "TCQ2 encode: loaded 2-bit codebook from %s\n", cb_path);
                 } else {
                     if (f) fclose(f);
@@ -564,8 +564,8 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             const uint3 ne02_fd = init_fastdiv_values((uint32_t) ne02);
             const uint3 ne11_fd = init_fastdiv_values((uint32_t) ne11);
             const uint3 ne12_fd = init_fastdiv_values((uint32_t) ne12);
-            k_set_rows_turbo2_tcq<idx_t><<<(int)ne_total_groups, 256, 0, stream>>>(
-                src0_d, src1_d, (block_turbo2_tcq *)dst->data,
+            k_set_rows_rq4_iso<idx_t><<<(int)ne_total_groups, 256, 0, stream>>>(
+                src0_d, src1_d, (block_rq4_iso *)dst->data,
                 ne_total_groups, tcq_bt_buf, ne00, ne01, ne02, ne10, ne11, ne12, ne13,
                 s01_f, s02_f, s03_f, s10_i, s11_i, s12_i, iq_is_k, nb1, nb2, nb3,
                 ne00_fd, ne01_fd, ne02_fd, ne11_fd, ne12_fd);
@@ -576,7 +576,7 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
 }
 
 
-// InnerQ calibration state machine (driven by TURBO_INNERQ env var)
+// InnerQ calibration state machine (driven by RQ_INNERQ env var)
 static int innerq_state = 0; // 0=uninit, 1=calibrating, 2=active, -1=disabled
 static int innerq_tokens_seen = 0;
 static constexpr int INNERQ_CALIBRATION_TOKENS = 100000; // count total set_rows tokens across all layers
@@ -589,36 +589,36 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT(src1->type == GGML_TYPE_I64 || src1->type == GGML_TYPE_I32);
 
     // Post-rotation extraction: one-time init
-    if (h_extract_state == 0 && (dst->type == GGML_TYPE_TURBO3_0 || dst->type == GGML_TYPE_TURBO4_0 || dst->type == GGML_TYPE_TURBO3_TCQ || dst->type == GGML_TYPE_TURBO2_TCQ)) {
-        static const char * env = getenv("TURBO_EXTRACT");
+    if (h_extract_state == 0 && (dst->type == GGML_TYPE_RQ3_0 || dst->type == GGML_TYPE_RQ4_0 || dst->type == GGML_TYPE_RQ3_ISO || dst->type == GGML_TYPE_RQ4_ISO)) {
+        static const char * env = getenv("RQ_EXTRACT");
         if (env && atoi(env) > 0) {
-            turbo_extract_init(atoi(env));
+            rq_extract_init(atoi(env));
         } else {
             h_extract_state = -1;
         }
     }
     // Check if extraction buffer is full
-    if (h_extract_state == 1) turbo_extract_check_done();
+    if (h_extract_state == 1) rq_extract_check_done();
 
-    // InnerQ: one-time init on first turbo SET_ROWS call
-    if (innerq_state == 0 && (dst->type == GGML_TYPE_TURBO2_0 || dst->type == GGML_TYPE_TURBO3_0 || dst->type == GGML_TYPE_TURBO4_0 || dst->type == GGML_TYPE_TURBO3_TCQ || dst->type == GGML_TYPE_TURBO2_TCQ)) {
-        static const char * env = getenv("TURBO_INNERQ");
+    // InnerQ: one-time init on first rq SET_ROWS call
+    if (innerq_state == 0 && (dst->type == GGML_TYPE_RQ2_0 || dst->type == GGML_TYPE_RQ3_0 || dst->type == GGML_TYPE_RQ4_0 || dst->type == GGML_TYPE_RQ3_ISO || dst->type == GGML_TYPE_RQ4_ISO)) {
+        static const char * env = getenv("RQ_INNERQ");
         if (env && atoi(env) > 0) {
-            turbo_innerq_init();
-            turbo_innerq_start_calibration();
+            rq_innerq_init();
+            rq_innerq_start_calibration();
             innerq_state = 1;
             fprintf(stderr, "InnerQ: calibration started (collecting %d tokens)\n", INNERQ_CALIBRATION_TOKENS);
         } else {
-            turbo_innerq_init(); // identity scales
+            rq_innerq_init(); // identity scales
             innerq_state = -1;
         }
     }
 
     // Track calibration progress
-    if (innerq_state == 1 && (dst->type == GGML_TYPE_TURBO3_0 || dst->type == GGML_TYPE_TURBO4_0 || dst->type == GGML_TYPE_TURBO3_TCQ || dst->type == GGML_TYPE_TURBO2_TCQ)) {
+    if (innerq_state == 1 && (dst->type == GGML_TYPE_RQ3_0 || dst->type == GGML_TYPE_RQ4_0 || dst->type == GGML_TYPE_RQ3_ISO || dst->type == GGML_TYPE_RQ4_ISO)) {
         innerq_tokens_seen += dst->src[0]->ne[1];
         if (innerq_tokens_seen >= INNERQ_CALIBRATION_TOKENS) {
-            turbo_innerq_finalize_calibration();
+            rq_innerq_finalize_calibration();
             innerq_state = 2;
             fprintf(stderr, "InnerQ: calibration complete, scales active\n");
         }

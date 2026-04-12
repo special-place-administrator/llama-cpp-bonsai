@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-TCQ (Trellis-Coded Quantization) prototype for TurboQuant KV cache.
+TCQ (Trellis-Coded Quantization) prototype for RotorQuant KV cache.
 Experiment #61: Compare bitshift-trellis TCQ vs Lloyd-Max scalar quantization
 on i.i.d. Gaussian data (post-FWHT KV cache distribution).
 

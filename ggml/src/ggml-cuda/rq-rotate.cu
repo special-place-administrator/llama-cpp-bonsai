@@ -1,19 +1,19 @@
-#include "turbo-wht.cuh"
+#include "rq-rotate.cuh"
 
-// Sign arrays for FWHT rotation (from turbo-wht.h, seed=42)
-static __constant__ float d_turbo_wht_s1[128] = {
+// Sign arrays for FWHT rotation (from rq-rotate.h, seed=42)
+static __constant__ float d_rq_wht_s1[128] = {
     -1, 1, 1,-1,-1, 1,-1, 1,-1,-1, 1, 1, 1, 1, 1, 1, 1,-1, 1,-1, 1,-1,-1, 1, 1, 1,-1, 1, 1,-1,-1,-1,
     -1, 1, 1,-1, 1, 1,-1, 1,-1, 1, 1,-1,-1, 1,-1, 1, 1, 1, 1,-1,-1,-1,-1,-1, 1,-1, 1, 1, 1, 1,-1, 1,
     -1,-1, 1,-1,-1,-1, 1,-1,-1,-1, 1,-1,-1,-1, 1, 1, 1,-1,-1, 1, 1, 1,-1,-1, 1, 1,-1, 1, 1,-1, 1,-1,
     -1, 1, 1,-1, 1,-1, 1,-1, 1, 1, 1, 1,-1, 1,-1, 1, 1,-1, 1, 1,-1,-1,-1,-1,-1, 1, 1,-1, 1, 1,-1, 1};
-static __constant__ float d_turbo_wht_s2[128] = {
+static __constant__ float d_rq_wht_s2[128] = {
      1, 1, 1, 1,-1, 1, 1,-1, 1,-1,-1,-1, 1,-1,-1,-1, 1, 1,-1,-1, 1,-1, 1,-1, 1,-1,-1, 1,-1, 1, 1, 1,
      1, 1,-1,-1,-1, 1,-1,-1,-1,-1,-1,-1, 1, 1, 1,-1, 1,-1, 1, 1, 1,-1,-1, 1,-1,-1,-1,-1,-1,-1, 1, 1,
      1,-1, 1,-1,-1,-1,-1, 1,-1, 1,-1, 1,-1,-1, 1, 1,-1, 1,-1, 1, 1,-1, 1,-1,-1,-1,-1, 1,-1,-1, 1,-1,
      1,-1, 1, 1, 1,-1,-1, 1,-1, 1,-1, 1, 1,-1,-1, 1,-1, 1,-1, 1, 1,-1, 1,-1, 1,-1,-1,-1,-1,-1, 1,-1};
 
 // One block per 128-element group. 128 threads per block.
-static __global__ void k_turbo_wht(
+static __global__ void k_rq_rotate(
         const float * __restrict__ src, float * __restrict__ dst,
         const int64_t n_elements, const int direction) {
 
@@ -21,8 +21,8 @@ static __global__ void k_turbo_wht(
     const int64_t offset = group * 128;
     if (offset >= n_elements) return;
 
-    const float * s_first  = (direction == 0) ? d_turbo_wht_s1 : d_turbo_wht_s2;
-    const float * s_second = (direction == 0) ? d_turbo_wht_s2 : d_turbo_wht_s1;
+    const float * s_first  = (direction == 0) ? d_rq_wht_s1 : d_rq_wht_s2;
+    const float * s_second = (direction == 0) ? d_rq_wht_s2 : d_rq_wht_s1;
 
     __shared__ float buf[128];
 
@@ -49,7 +49,7 @@ static __global__ void k_turbo_wht(
     }
 }
 
-void ggml_cuda_op_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void ggml_cuda_op_rq_rotate(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     GGML_ASSERT(src0->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
@@ -64,5 +64,5 @@ void ggml_cuda_op_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
     const int64_t n_elements = ggml_nelements(src0);
     const int64_t n_groups = n_elements / 128;
 
-    k_turbo_wht<<<(int)n_groups, 128, 0, stream>>>(src_d, dst_d, n_elements, direction);
+    k_rq_rotate<<<(int)n_groups, 128, 0, stream>>>(src_d, dst_d, n_elements, direction);
 }

@@ -1,9 +1,9 @@
 /*
- * TurboQuant: KV cache compression via PolarQuant + QJL
+ * RotorQuant: KV cache compression via PolarQuant + QJL
  * Based on: arXiv 2504.19874 (ICLR 2026)
  *
- * Implements GGML_TYPE_TURBO3_0 (3-bit) and GGML_TYPE_TURBO4_0 (4-bit)
- * for use as --cache-type-k turbo3 --cache-type-v turbo3 in llama-server.
+ * Implements GGML_TYPE_RQ3_0 (3-bit) and GGML_TYPE_RQ4_0 (4-bit)
+ * for use as --cache-type-k rq3 --cache-type-v rq3 in llama-server.
  */
 
 #include "ggml-quants.h"
@@ -18,10 +18,10 @@
 
 /* ---------- constants ---------- */
 
-#define TURBO_SEED_ROTATION 42
-#define TURBO_SEED_QJL      1042
-#define TURBO_D             128  /* rotation group size = head_dim (independent of block size) */
-#define TURBO_QJL_CONST     1.2533141373155003f  /* sqrt(pi/2) */
+#define RQ_SEED_ROTATION 42
+#define RQ_SEED_QJL      1042
+#define RQ_D             128  /* rotation group size = head_dim (independent of block size) */
+#define RQ_QJL_CONST     1.2533141373155003f  /* sqrt(pi/2) */
 
 /* Optimal centroids from paper (scaled by 1/sqrt(d)) */
 /* 1-bit: ±sqrt(2/(pi*d)) */
@@ -51,53 +51,53 @@ static const float MIDPOINTS_4BIT[15] = {
 
 /* ---------- rotation matrix (lazy init) ---------- */
 
-static float turbo_rotation[TURBO_D * TURBO_D];
-static float turbo_rotation_t[TURBO_D * TURBO_D]; /* transpose */
-static int   turbo_rotation_initialized = 0;
+static float rq_rotation[RQ_D * RQ_D];
+static float rq_rotation_t[RQ_D * RQ_D]; /* transpose */
+static int   rq_rotation_initialized = 0;
 
 /* Simple LCG PRNG for deterministic rotation generation */
-static uint64_t turbo_prng_state;
+static uint64_t rq_prng_state;
 
-static void turbo_prng_seed(uint64_t seed) {
-    turbo_prng_state = seed;
+static void rq_prng_seed(uint64_t seed) {
+    rq_prng_state = seed;
 }
 
-static double turbo_prng_normal(void) {
+static double rq_prng_normal(void) {
     /* Box-Muller transform from uniform LCG */
-    turbo_prng_state = turbo_prng_state * 6364136223846793005ULL + 1442695040888963407ULL;
-    double u1 = (double)(turbo_prng_state >> 11) / (double)(1ULL << 53);
+    rq_prng_state = rq_prng_state * 6364136223846793005ULL + 1442695040888963407ULL;
+    double u1 = (double)(rq_prng_state >> 11) / (double)(1ULL << 53);
     if (u1 < 1e-15) u1 = 1e-15;
-    turbo_prng_state = turbo_prng_state * 6364136223846793005ULL + 1442695040888963407ULL;
-    double u2 = (double)(turbo_prng_state >> 11) / (double)(1ULL << 53);
+    rq_prng_state = rq_prng_state * 6364136223846793005ULL + 1442695040888963407ULL;
+    double u2 = (double)(rq_prng_state >> 11) / (double)(1ULL << 53);
     return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
 }
 
-static void turbo_init_rotation(void) {
-    if (turbo_rotation_initialized) return;
+static void rq_init_rotation(void) {
+    if (rq_rotation_initialized) return;
 
-    const int d = TURBO_D;
+    const int d = RQ_D;
 
     /* Generate random Gaussian matrix */
-    turbo_prng_seed(TURBO_SEED_ROTATION);
-    float G[TURBO_D * TURBO_D];
+    rq_prng_seed(RQ_SEED_ROTATION);
+    float G[RQ_D * RQ_D];
     for (int i = 0; i < d * d; i++) {
-        G[i] = (float)turbo_prng_normal();
+        G[i] = (float)rq_prng_normal();
     }
 
     /* QR decomposition via modified Gram-Schmidt */
-    /* Q stored column-major in turbo_rotation */
-    memcpy(turbo_rotation, G, d * d * sizeof(float));
+    /* Q stored column-major in rq_rotation */
+    memcpy(rq_rotation, G, d * d * sizeof(float));
 
     for (int j = 0; j < d; j++) {
         /* Normalize column j */
         float norm = 0.0f;
         for (int i = 0; i < d; i++) {
-            norm += turbo_rotation[i * d + j] * turbo_rotation[i * d + j];
+            norm += rq_rotation[i * d + j] * rq_rotation[i * d + j];
         }
         norm = sqrtf(norm);
         if (norm > 1e-10f) {
             for (int i = 0; i < d; i++) {
-                turbo_rotation[i * d + j] /= norm;
+                rq_rotation[i * d + j] /= norm;
             }
         }
 
@@ -105,10 +105,10 @@ static void turbo_init_rotation(void) {
         for (int k = j + 1; k < d; k++) {
             float dot = 0.0f;
             for (int i = 0; i < d; i++) {
-                dot += turbo_rotation[i * d + j] * turbo_rotation[i * d + k];
+                dot += rq_rotation[i * d + j] * rq_rotation[i * d + k];
             }
             for (int i = 0; i < d; i++) {
-                turbo_rotation[i * d + k] -= dot * turbo_rotation[i * d + j];
+                rq_rotation[i * d + k] -= dot * rq_rotation[i * d + j];
             }
         }
     }
@@ -116,37 +116,37 @@ static void turbo_init_rotation(void) {
     /* Compute transpose */
     for (int i = 0; i < d; i++) {
         for (int j = 0; j < d; j++) {
-            turbo_rotation_t[i * d + j] = turbo_rotation[j * d + i];
+            rq_rotation_t[i * d + j] = rq_rotation[j * d + i];
         }
     }
 
-    turbo_rotation_initialized = 1;
+    rq_rotation_initialized = 1;
 }
 
 /* ---------- QJL projection matrix (lazy init, seed-based) ---------- */
 
-static float turbo_qjl_matrix[TURBO_D * TURBO_D];
-static float turbo_qjl_matrix_t[TURBO_D * TURBO_D];
-static int   turbo_qjl_initialized = 0;
+static float rq_qjl_matrix[RQ_D * RQ_D];
+static float rq_qjl_matrix_t[RQ_D * RQ_D];
+static int   rq_qjl_initialized = 0;
 
-static void turbo_init_qjl(void) {
-    if (turbo_qjl_initialized) return;
+static void rq_init_qjl(void) {
+    if (rq_qjl_initialized) return;
 
-    const int d = TURBO_D;
-    turbo_prng_seed(TURBO_SEED_QJL);
+    const int d = RQ_D;
+    rq_prng_seed(RQ_SEED_QJL);
 
     for (int i = 0; i < d * d; i++) {
-        turbo_qjl_matrix[i] = (float)turbo_prng_normal();
+        rq_qjl_matrix[i] = (float)rq_prng_normal();
     }
 
     /* Transpose */
     for (int i = 0; i < d; i++) {
         for (int j = 0; j < d; j++) {
-            turbo_qjl_matrix_t[i * d + j] = turbo_qjl_matrix[j * d + i];
+            rq_qjl_matrix_t[i * d + j] = rq_qjl_matrix[j * d + i];
         }
     }
 
-    turbo_qjl_initialized = 1;
+    rq_qjl_initialized = 1;
 }
 
 /* ---------- helper: matrix-vector multiply ---------- */
@@ -205,183 +205,183 @@ static int nearest_centroid_4bit(float val) {
     }
 }
 
-/* ---------- TURBO2_0: 2-bit PolarQuant, no QJL ---------- */
+/* ---------- RQ2_0: 2-bit PolarQuant, no QJL ---------- */
 
-void quantize_row_turbo2_0_ref(const float * GGML_RESTRICT x, block_turbo2_0 * GGML_RESTRICT y, int64_t k) {
-    assert(k % QK_TURBO2 == 0);
-    const int nb = k / QK_TURBO2;
+void quantize_row_rq2_0_ref(const float * GGML_RESTRICT x, block_rq2_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_RQ2 == 0);
+    const int nb = k / QK_RQ2;
     for (int i = 0; i < nb; i++) {
         float norm = 0.0f;
-        for (int j = 0; j < QK_TURBO2; j++) norm += x[i*QK_TURBO2 + j] * x[i*QK_TURBO2 + j];
+        for (int j = 0; j < QK_RQ2; j++) norm += x[i*QK_RQ2 + j] * x[i*QK_RQ2 + j];
         y[i].norm = GGML_FP32_TO_FP16(sqrtf(norm));
-        memset(y[i].qs, 0, QK_TURBO2 / 4);
+        memset(y[i].qs, 0, QK_RQ2 / 4);
     }
 }
 
-void dequantize_row_turbo2_0(const block_turbo2_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    assert(k % QK_TURBO2 == 0);
-    const int nb = k / QK_TURBO2;
+void dequantize_row_rq2_0(const block_rq2_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_RQ2 == 0);
+    const int nb = k / QK_RQ2;
     for (int block = 0; block < nb; block++) {
         float norm = GGML_FP16_TO_FP32(x[block].norm);
-        for (int j = 0; j < QK_TURBO2; j++) {
+        for (int j = 0; j < QK_RQ2; j++) {
             uint8_t idx = (x[block].qs[j/4] >> ((j%4)*2)) & 0x3;
-            y[block * QK_TURBO2 + j] = CENTROIDS_2BIT[idx] * norm;
+            y[block * QK_RQ2 + j] = CENTROIDS_2BIT[idx] * norm;
         }
     }
 }
 
-size_t quantize_turbo2_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+size_t quantize_rq2_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                          int64_t nrows, int64_t n_per_row, const float * imatrix) {
     GGML_UNUSED(imatrix);
-    assert(n_per_row % QK_TURBO2 == 0);
+    assert(n_per_row % QK_RQ2 == 0);
 
-    size_t row_size = (n_per_row / QK_TURBO2) * sizeof(block_turbo2_0);
+    size_t row_size = (n_per_row / QK_RQ2) * sizeof(block_rq2_0);
     for (int64_t row = 0; row < nrows; row++) {
-        quantize_row_turbo2_0_ref(
+        quantize_row_rq2_0_ref(
             src + row * n_per_row,
-            (block_turbo2_0 *)((char *)dst + row * row_size),
+            (block_rq2_0 *)((char *)dst + row * row_size),
             n_per_row
         );
     }
     return nrows * row_size;
 }
 
-/* ---------- TURBO3_0: 2-bit PolarQuant + 1-bit QJL ---------- */
+/* ---------- RQ3_0: 2-bit PolarQuant + 1-bit QJL ---------- */
 
-void quantize_row_turbo3_0_ref(const float * GGML_RESTRICT x, block_turbo3_0 * GGML_RESTRICT y, int64_t k) {
+void quantize_row_rq3_0_ref(const float * GGML_RESTRICT x, block_rq3_0 * GGML_RESTRICT y, int64_t k) {
     // Stub — Metal shader handles quantize on GPU. CPU path is simplified.
-    assert(k % QK_TURBO3 == 0);
-    const int nb = k / QK_TURBO3;
+    assert(k % QK_RQ3 == 0);
+    const int nb = k / QK_RQ3;
     for (int i = 0; i < nb; i++) {
         float norm = 0.0f;
-        for (int j = 0; j < QK_TURBO3; j++) norm += x[i*QK_TURBO3 + j] * x[i*QK_TURBO3 + j];
+        for (int j = 0; j < QK_RQ3; j++) norm += x[i*QK_RQ3 + j] * x[i*QK_RQ3 + j];
         y[i].norm = GGML_FP32_TO_FP16(sqrtf(norm));
-        memset(y[i].qs, 0, QK_TURBO3 / 4);
-        memset(y[i].signs, 0, QK_TURBO3 / 8);
+        memset(y[i].qs, 0, QK_RQ3 / 4);
+        memset(y[i].signs, 0, QK_RQ3 / 8);
     }
 }
 
-void dequantize_row_turbo3_0(const block_turbo3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+void dequantize_row_rq3_0(const block_rq3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     // Stub — Metal shader handles dequant on GPU.
-    assert(k % QK_TURBO3 == 0);
-    const int nb = k / QK_TURBO3;
+    assert(k % QK_RQ3 == 0);
+    const int nb = k / QK_RQ3;
     for (int block = 0; block < nb; block++) {
         float norm = GGML_FP16_TO_FP32(x[block].norm);
-        for (int j = 0; j < QK_TURBO3; j++) {
+        for (int j = 0; j < QK_RQ3; j++) {
             uint8_t low2 = (x[block].qs[j/4] >> ((j%4)*2)) & 0x3;
             uint8_t hi1 = (x[block].signs[j/8] >> (j%8)) & 0x1;
             uint8_t idx = low2 | (hi1 << 2);
-            y[block * QK_TURBO3 + j] = CENTROIDS_3BIT[idx] * norm;
+            y[block * QK_RQ3 + j] = CENTROIDS_3BIT[idx] * norm;
         }
     }
 }
 
-size_t quantize_turbo3_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+size_t quantize_rq3_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                          int64_t nrows, int64_t n_per_row, const float * imatrix) {
     GGML_UNUSED(imatrix);
-    assert(n_per_row % QK_TURBO3 == 0);
+    assert(n_per_row % QK_RQ3 == 0);
 
-    size_t row_size = (n_per_row / QK_TURBO3) * sizeof(block_turbo3_0);
+    size_t row_size = (n_per_row / QK_RQ3) * sizeof(block_rq3_0);
     for (int64_t row = 0; row < nrows; row++) {
-        quantize_row_turbo3_0_ref(
+        quantize_row_rq3_0_ref(
             src + row * n_per_row,
-            (block_turbo3_0 *)((char *)dst + row * row_size),
+            (block_rq3_0 *)((char *)dst + row * row_size),
             n_per_row
         );
     }
     return nrows * row_size;
 }
 
-/* ---------- TURBO3_TCQ: Trellis-Coded Quantization ---------- */
+/* ---------- RQ3_ISO: Trellis-Coded Quantization ---------- */
 
-void quantize_row_turbo3_tcq_ref(const float * GGML_RESTRICT x, block_turbo3_tcq * GGML_RESTRICT y, int64_t k) {
+void quantize_row_rq3_iso_ref(const float * GGML_RESTRICT x, block_rq3_iso * GGML_RESTRICT y, int64_t k) {
     // Stub — CUDA kernel handles TCQ quantize (Viterbi). CPU path zeros out.
-    assert(k % QK_TURBO3_TCQ == 0);
-    const int nb = k / QK_TURBO3_TCQ;
+    assert(k % QK_RQ3_ISO == 0);
+    const int nb = k / QK_RQ3_ISO;
     for (int i = 0; i < nb; i++) {
         float norm = 0.0f;
-        for (int j = 0; j < QK_TURBO3_TCQ; j++) norm += x[i*QK_TURBO3_TCQ + j] * x[i*QK_TURBO3_TCQ + j];
+        for (int j = 0; j < QK_RQ3_ISO; j++) norm += x[i*QK_RQ3_ISO + j] * x[i*QK_RQ3_ISO + j];
         y[i].norm = GGML_FP32_TO_FP16(sqrtf(norm));
         memset(y[i].qs, 0, 49);
     }
 }
 
-void dequantize_row_turbo3_tcq(const block_turbo3_tcq * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+void dequantize_row_rq3_iso(const block_rq3_iso * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
     // CPU dequant stub — placeholder (no codebook on CPU yet)
-    assert(k % QK_TURBO3_TCQ == 0);
-    const int nb = k / QK_TURBO3_TCQ;
+    assert(k % QK_RQ3_ISO == 0);
+    const int nb = k / QK_RQ3_ISO;
     for (int block = 0; block < nb; block++) {
-        for (int j = 0; j < QK_TURBO3_TCQ; j++) {
-            y[block * QK_TURBO3_TCQ + j] = 0.0f;
+        for (int j = 0; j < QK_RQ3_ISO; j++) {
+            y[block * QK_RQ3_ISO + j] = 0.0f;
         }
     }
 }
 
-size_t quantize_turbo3_tcq(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+size_t quantize_rq3_iso(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                          int64_t nrows, int64_t n_per_row, const float * imatrix) {
     GGML_UNUSED(imatrix);
-    assert(n_per_row % QK_TURBO3_TCQ == 0);
+    assert(n_per_row % QK_RQ3_ISO == 0);
 
-    size_t row_size = (n_per_row / QK_TURBO3_TCQ) * sizeof(block_turbo3_tcq);
+    size_t row_size = (n_per_row / QK_RQ3_ISO) * sizeof(block_rq3_iso);
     for (int64_t row = 0; row < nrows; row++) {
-        quantize_row_turbo3_tcq_ref(
+        quantize_row_rq3_iso_ref(
             src + row * n_per_row,
-            (block_turbo3_tcq *)((char *)dst + row * row_size),
+            (block_rq3_iso *)((char *)dst + row * row_size),
             n_per_row
         );
     }
     return nrows * row_size;
 }
 
-/* ---------- TURBO2_TCQ: 2-bit Trellis-Coded Quantization ---------- */
+/* ---------- RQ4_ISO: 2-bit Trellis-Coded Quantization ---------- */
 
-void quantize_row_turbo2_tcq_ref(const float * GGML_RESTRICT x, block_turbo2_tcq * GGML_RESTRICT y, int64_t k) {
+void quantize_row_rq4_iso_ref(const float * GGML_RESTRICT x, block_rq4_iso * GGML_RESTRICT y, int64_t k) {
 	// Stub — CUDA kernel handles TCQ quantize (Viterbi). CPU path zeros out.
-	assert(k % QK_TURBO2_TCQ == 0);
-	const int nb = k / QK_TURBO2_TCQ;
+	assert(k % QK_RQ4_ISO == 0);
+	const int nb = k / QK_RQ4_ISO;
 	for (int i = 0; i < nb; i++) {
 		float norm = 0.0f;
-		for (int j = 0; j < QK_TURBO2_TCQ; j++) norm += x[i*QK_TURBO2_TCQ + j] * x[i*QK_TURBO2_TCQ + j];
+		for (int j = 0; j < QK_RQ4_ISO; j++) norm += x[i*QK_RQ4_ISO + j] * x[i*QK_RQ4_ISO + j];
 		y[i].norm = GGML_FP32_TO_FP16(sqrtf(norm));
 		memset(y[i].qs, 0, 33);
 	}
 }
 
-void dequantize_row_turbo2_tcq(const block_turbo2_tcq * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+void dequantize_row_rq4_iso(const block_rq4_iso * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
 	// CPU dequant stub — placeholder (no codebook on CPU yet)
-	assert(k % QK_TURBO2_TCQ == 0);
-	const int nb = k / QK_TURBO2_TCQ;
+	assert(k % QK_RQ4_ISO == 0);
+	const int nb = k / QK_RQ4_ISO;
 	for (int block = 0; block < nb; block++) {
-		for (int j = 0; j < QK_TURBO2_TCQ; j++) {
-			y[block * QK_TURBO2_TCQ + j] = 0.0f;
+		for (int j = 0; j < QK_RQ4_ISO; j++) {
+			y[block * QK_RQ4_ISO + j] = 0.0f;
 		}
 	}
 }
 
-size_t quantize_turbo2_tcq(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+size_t quantize_rq4_iso(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                          int64_t nrows, int64_t n_per_row, const float * imatrix) {
 	GGML_UNUSED(imatrix);
-	assert(n_per_row % QK_TURBO2_TCQ == 0);
+	assert(n_per_row % QK_RQ4_ISO == 0);
 
-	size_t row_size = (n_per_row / QK_TURBO2_TCQ) * sizeof(block_turbo2_tcq);
+	size_t row_size = (n_per_row / QK_RQ4_ISO) * sizeof(block_rq4_iso);
 	for (int64_t row = 0; row < nrows; row++) {
-		quantize_row_turbo2_tcq_ref(
+		quantize_row_rq4_iso_ref(
 			src + row * n_per_row,
-			(block_turbo2_tcq *)((char *)dst + row * row_size),
+			(block_rq4_iso *)((char *)dst + row * row_size),
 			n_per_row
 		);
 	}
 	return nrows * row_size;
 }
 
-/* ---------- TURBO4_0: 4-bit PolarQuant (16 centroids, no QJL) ---------- */
+/* ---------- RQ4_0: 4-bit PolarQuant (16 centroids, no QJL) ---------- */
 
-void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * GGML_RESTRICT y, int64_t k) {
-    turbo_init_rotation();
+void quantize_row_rq4_0_ref(const float * GGML_RESTRICT x, block_rq4_0 * GGML_RESTRICT y, int64_t k) {
+    rq_init_rotation();
 
-    assert(k % QK_TURBO4 == 0);
-    const int nb = k / QK_TURBO4;
-    const int d  = QK_TURBO4;
+    assert(k % QK_RQ4 == 0);
+    const int nb = k / QK_RQ4;
+    const int d  = QK_RQ4;
 
     for (int block = 0; block < nb; block++) {
         const float * src = x + block * d;
@@ -392,7 +392,7 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
         float norm = sqrtf(norm_sq);
 
         /* Normalize */
-        float normalized[TURBO_D];
+        float normalized[RQ_D];
         if (norm > 1e-10f) {
             const float inv = 1.0f / norm;
             for (int i = 0; i < d; i++) normalized[i] = src[i] * inv;
@@ -401,11 +401,11 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
         }
 
         /* Step 2: Rotate */
-        float rotated[TURBO_D];
-        matvec(turbo_rotation, normalized, rotated, d);
+        float rotated[RQ_D];
+        matvec(rq_rotation, normalized, rotated, d);
 
         /* Step 3: 4-bit quantization — find nearest of 16 centroids */
-        uint8_t indices[TURBO_D];
+        uint8_t indices[RQ_D];
         for (int i = 0; i < d; i++) {
             indices[i] = (uint8_t)nearest_centroid_4bit(rotated[i]);
         }
@@ -426,18 +426,18 @@ void quantize_row_turbo4_0_ref(const float * GGML_RESTRICT x, block_turbo4_0 * G
     }
 }
 
-void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
-    turbo_init_rotation();
+void dequantize_row_rq4_0(const block_rq4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    rq_init_rotation();
 
-    assert(k % QK_TURBO4 == 0);
-    const int nb = k / QK_TURBO4;
-    const int d  = QK_TURBO4;
+    assert(k % QK_RQ4 == 0);
+    const int nb = k / QK_RQ4;
+    const int d  = QK_RQ4;
 
     for (int block = 0; block < nb; block++) {
         float norm = GGML_FP16_TO_FP32(x[block].norm);
 
         /* Unpack 4-bit indices and reconstruct in rotated space */
-        float rotated_recon[TURBO_D];
+        float rotated_recon[RQ_D];
         for (int i = 0; i < d; i++) {
             uint8_t idx = (i & 1) ? (x[block].qs[i / 2] >> 4) : (x[block].qs[i / 2] & 0xF);
             rotated_recon[i] = CENTROIDS_4BIT[idx];
@@ -445,7 +445,7 @@ void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGM
 
         /* Inverse rotate */
         float * dst = y + block * d;
-        matvec(turbo_rotation_t, rotated_recon, dst, d);
+        matvec(rq_rotation_t, rotated_recon, dst, d);
 
         /* Scale by norm */
         for (int i = 0; i < d; i++) {
@@ -454,16 +454,16 @@ void dequantize_row_turbo4_0(const block_turbo4_0 * GGML_RESTRICT x, float * GGM
     }
 }
 
-size_t quantize_turbo4_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+size_t quantize_rq4_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
                          int64_t nrows, int64_t n_per_row, const float * imatrix) {
     GGML_UNUSED(imatrix);
-    assert(n_per_row % QK_TURBO4 == 0);
+    assert(n_per_row % QK_RQ4 == 0);
 
-    size_t row_size = (n_per_row / QK_TURBO4) * sizeof(block_turbo4_0);
+    size_t row_size = (n_per_row / QK_RQ4) * sizeof(block_rq4_0);
     for (int64_t row = 0; row < nrows; row++) {
-        quantize_row_turbo4_0_ref(
+        quantize_row_rq4_0_ref(
             src + row * n_per_row,
-            (block_turbo4_0 *)((char *)dst + row * row_size),
+            (block_rq4_0 *)((char *)dst + row * row_size),
             n_per_row
         );
     }

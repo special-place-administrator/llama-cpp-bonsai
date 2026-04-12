@@ -428,13 +428,14 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
-        GGML_TYPE_TURBO3_0 = 41, // TurboQuant 3-bit KV cache: 2-bit PolarQuant + 1-bit QJL
-        GGML_TYPE_TURBO4_0 = 42, // TurboQuant 4-bit KV cache: 3-bit PolarQuant + 1-bit QJL
-        GGML_TYPE_TURBO2_0 = 43, // TurboQuant 2-bit KV cache: 2-bit PolarQuant, no QJL
+        GGML_TYPE_RQ3_0    = 41, // RotorQuant 3-bit KV cache: PlanarQuant (Givens 2D) + Lloyd-Max
+        GGML_TYPE_RQ4_0    = 42, // RotorQuant 4-bit KV cache: PlanarQuant (Givens 2D) + Lloyd-Max
+        GGML_TYPE_RQ2_0    = 43, // RotorQuant 2-bit KV cache: PlanarQuant (Givens 2D), economy
+        // IDs 44, 45 = Q1_0 — DO NOT TOUCH
         GGML_TYPE_Q1_0_g128 = 44, // PrismML 1-bit (binary), 128 group size
         GGML_TYPE_Q1_0    = 45, // PrismML 1-bit (binary), 32 group size
-        GGML_TYPE_TURBO3_TCQ = 46, // TurboQuant 3-bit KV cache: TCQ (Trellis-Coded Quantization)
-        GGML_TYPE_TURBO2_TCQ = 47, // TurboQuant 2-bit KV cache: TCQ (k=2, L=8, 256 states)
+        GGML_TYPE_RQ3_ISO  = 46, // RotorQuant 3-bit KV cache: IsoQuant (quaternion 4D) + Lloyd-Max
+        GGML_TYPE_RQ4_ISO  = 47, // RotorQuant 4-bit KV cache: IsoQuant (quaternion 4D) + Lloyd-Max
         GGML_TYPE_COUNT   = 48,
     };
 
@@ -566,7 +567,7 @@ extern "C" {
         GGML_OP_RWKV_WKV7,
         GGML_OP_SOLVE_TRI,
         GGML_OP_GATED_DELTA_NET,
-        GGML_OP_TURBO_WHT,
+        GGML_OP_RQ_ROTATE,  // RotorQuant block-diagonal rotation (Givens/quaternion)
 
         GGML_OP_UNARY,
 
@@ -2489,10 +2490,10 @@ extern "C" {
             struct ggml_tensor  * beta,
             struct ggml_tensor  * state);
 
-    // TurboQuant Walsh-Hadamard Transform (O(d log d) rotation for KV cache compression)
+    // RotorQuant Walsh-Hadamard Transform (O(d log d) rotation for KV cache compression)
     // Applies WHT rotation to 128-element groups along ne[0]: sign1 → butterfly → sign2 → normalize
     // direction: 0 = forward (signs1 → WHT → signs2), 1 = inverse (signs2 → WHT → signs1)
-    GGML_API struct ggml_tensor * ggml_turbo_wht(
+    GGML_API struct ggml_tensor * ggml_rq_rotate(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             int                   direction);

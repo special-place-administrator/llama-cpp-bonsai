@@ -390,20 +390,20 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .vec_dot_type             = GGML_TYPE_Q8_K,
         .nrows                    = 1,
     },
-    [GGML_TYPE_TURBO2_0] = {
-        .from_float               = (ggml_from_float_t) quantize_row_turbo2_0_ref,
+    [GGML_TYPE_RQ2_0] = {
+        .from_float               = (ggml_from_float_t) quantize_row_rq2_0_ref,
         .vec_dot                  = NULL,
         .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
-    [GGML_TYPE_TURBO3_0] = {
-        .from_float               = (ggml_from_float_t) quantize_row_turbo3_0_ref,
+    [GGML_TYPE_RQ3_0] = {
+        .from_float               = (ggml_from_float_t) quantize_row_rq3_0_ref,
         .vec_dot                  = NULL,
         .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
     },
-    [GGML_TYPE_TURBO4_0] = {
-        .from_float               = (ggml_from_float_t) quantize_row_turbo4_0_ref,
+    [GGML_TYPE_RQ4_0] = {
+        .from_float               = (ggml_from_float_t) quantize_row_rq4_0_ref,
         .vec_dot                  = NULL,
         .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
@@ -2061,9 +2061,9 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_gated_delta_net(params, tensor);
             } break;
-        case GGML_OP_TURBO_WHT:
+        case GGML_OP_RQ_ROTATE:
             {
-                ggml_compute_forward_turbo_wht(params, tensor);
+                ggml_compute_forward_rq_rotate(params, tensor);
             } break;
         case GGML_OP_MAP_CUSTOM1:
             {
@@ -2245,7 +2245,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_COUNT_EQUAL:
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_GATED_DELTA_NET:
-        case GGML_OP_TURBO_WHT:
+        case GGML_OP_RQ_ROTATE:
             {
                 n_tasks = n_threads;
             } break;
@@ -2964,7 +2964,7 @@ struct ggml_cplan ggml_graph_plan(
                         const int64_t S_v = node->src[2]->ne[0];
                         cur = S_v * sizeof(float) * n_tasks;
                     } break;
-                case GGML_OP_TURBO_WHT:
+                case GGML_OP_RQ_ROTATE:
                     {
                         cur = 0;  // no extra workspace needed
                     } break;

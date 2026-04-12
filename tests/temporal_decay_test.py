@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Temporal Decay Prototype — validate 3->2 bit requantization quality.
 
-Adapted from TheTom/turboquant_plus/benchmarks/temporal_decay_prototype.py
+Adapted from TheTom/rotorquant_plus/benchmarks/temporal_decay_prototype.py
 Self-contained: no external dependencies beyond numpy.
 
-Tests whether progressive requantization (turbo3 -> effective 2-bit) preserves
+Tests whether progressive requantization (rq3 -> effective 2-bit) preserves
 enough quality for old KV cache tokens.
 """
 
@@ -47,7 +47,7 @@ def fwht_128(x):
 
 
 def rotate_forward(x, signs1, signs2):
-	"""signs1 -> FWHT -> signs2 (matching TurboQuant rotation)."""
+	"""signs1 -> FWHT -> signs2 (matching RotorQuant rotation)."""
 	out = x.copy()
 	out *= signs1
 	fwht_128(out)
@@ -121,7 +121,7 @@ def run_synthetic_test(d=128, n_vectors=1000, seed=42):
 
 	rng = np.random.default_rng(seed)
 
-	# Generate random sign arrays (matching TurboQuant's approach)
+	# Generate random sign arrays (matching RotorQuant's approach)
 	signs1 = rng.choice([-1.0, 1.0], size=d).astype(np.float32)
 	signs2 = rng.choice([-1.0, 1.0], size=d).astype(np.float32)
 
@@ -141,7 +141,7 @@ def run_synthetic_test(d=128, n_vectors=1000, seed=42):
 
 		x_rotated = rotate_forward(x_normalized, signs1, signs2)
 
-		# Path A: 3-bit (current turbo3)
+		# Path A: 3-bit (current rq3)
 		indices_3bit = quantize_3bit(x_rotated)
 		recon_3bit_rotated = dequantize_3bit(indices_3bit, norm)
 		recon_3bit = rotate_inverse(recon_3bit_rotated / norm, signs1, signs2) * norm
@@ -173,7 +173,7 @@ def run_synthetic_test(d=128, n_vectors=1000, seed=42):
 
 	print(f"{'Method':<25} {'Cosine Sim':>12} {'MSE':>12} {'vs 3-bit':>10}")
 	print(f"{'-'*25} {'-'*12} {'-'*12} {'-'*10}")
-	print(f"{'turbo3 (3-bit)':<25} {cs3:>12.6f} {m3:>12.6f} {'baseline':>10}")
+	print(f"{'rq3 (3-bit)':<25} {cs3:>12.6f} {m3:>12.6f} {'baseline':>10}")
 	print(f"{'Direct 2-bit':<25} {cs2:>12.6f} {m2:>12.6f} {m2/m3:>10.2f}x")
 	print(f"{'Decay 3->2 (requant)':<25} {csd:>12.6f} {md:>12.6f} {md/m3:>10.2f}x")
 	print()
@@ -238,23 +238,23 @@ def run_memory_savings_estimate():
 	n_kv_heads = 4
 	d_head = 256
 
-	turbo3_bpe = 3.5 / 8
-	turbo2_bpe = 2.0 / 8
+	rq3_bpe = 3.5 / 8
+	rq2_bpe = 2.0 / 8
 
 	for context in [32768, 65536, 131072, 262144]:
-		kv_no_decay = context * n_layers * n_kv_heads * d_head * 2 * turbo3_bpe
+		kv_no_decay = context * n_layers * n_kv_heads * d_head * 2 * rq3_bpe
 
 		recent = min(4096, context)
 		old = context - recent
 
-		# Decay 32 of 40 layers, keep first4+last4 at turbo3
+		# Decay 32 of 40 layers, keep first4+last4 at rq3
 		decay_layers = 32
 		no_decay_layers = 8
 
 		kv_decay = (
-			recent * n_layers * n_kv_heads * d_head * 2 * turbo3_bpe +
-			old * decay_layers * n_kv_heads * d_head * 2 * turbo2_bpe +
-			old * no_decay_layers * n_kv_heads * d_head * 2 * turbo3_bpe
+			recent * n_layers * n_kv_heads * d_head * 2 * rq3_bpe +
+			old * decay_layers * n_kv_heads * d_head * 2 * rq2_bpe +
+			old * no_decay_layers * n_kv_heads * d_head * 2 * rq3_bpe
 		)
 
 		savings_pct = (1 - kv_decay / kv_no_decay) * 100
@@ -268,7 +268,7 @@ def run_memory_savings_estimate():
 
 
 if __name__ == "__main__":
-	print("TurboQuant Temporal Decay Prototype")
+	print("RotorQuant Temporal Decay Prototype")
 	print("=" * 60)
 
 	synthetic = run_synthetic_test(d=128, n_vectors=1000)

@@ -1,7 +1,7 @@
 // CUDA TCQ codebook training — 100-1000x faster than numpy Viterbi
 // Compile: nvcc -O3 -arch=sm_86 -o tcq_train_cuda tcq_train_cuda.cu -lcurand
 // Usage:   ./tcq_train_cuda --bits 2 --n-train 100000 --n-iters 200
-//          ./tcq_train_cuda --bits 3 --data-file /tmp/turbo_postrot.bin --n-iters 100
+//          ./tcq_train_cuda --bits 3 --data-file /tmp/rq_postrot.bin --n-iters 100
 //          ./tcq_train_cuda --bits 3 --constrain-monotonicity --output-dir /tmp/codebooks
 
 #include <cstdio>

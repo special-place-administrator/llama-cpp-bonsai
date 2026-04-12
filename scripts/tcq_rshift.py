@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 TCQ with right-shift trellis for O(1) parallel decode.
-Trains codebook for turbo3_tcq CUDA implementation.
+Trains codebook for rq3_iso CUDA implementation.
 
 Right-shift trellis: next_state = (state >> k) | (output << (L-k))
 This allows decode via sliding 9-bit window over output bitstream.
@@ -221,7 +221,7 @@ if __name__ == '__main__':
 	print(f"\n// Right-shift TCQ codebook: k=3, L=9 (512 states)")
 	print(f"// MSE reduction: {reduction:.1f}% vs Lloyd-Max, {db_gain:.2f} dB")
 	print(f"// Initial state = 0, decode: state_t = read_9_bits(qs, t*3)")
-	print(f"static __constant__ float d_turbo3_tcq_codebook[512] = {{")
+	print(f"static __constant__ float d_rq3_iso_codebook[512] = {{")
 	for i in range(0, 512, 8):
 		vals = ', '.join(f'{trellis.codebook[j]:+.7f}' for j in range(i, min(i+8, 512)))
 		print(f"    {vals},")

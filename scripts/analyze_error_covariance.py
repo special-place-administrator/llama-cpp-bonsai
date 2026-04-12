@@ -72,7 +72,7 @@ def parse_codebook_from_file(filepath):
 	"""Extract codebook values from CUDA trainer output file."""
 	with open(filepath) as f:
 		text = f.read()
-	m = re.search(r'static __constant__ float d_turbo3_tcq_codebook\[512\] = \{\n(.*?)\};', text, re.DOTALL)
+	m = re.search(r'static __constant__ float d_rq3_iso_codebook\[512\] = \{\n(.*?)\};', text, re.DOTALL)
 	if not m:
 		return None
 	vals = []
@@ -144,9 +144,9 @@ def count_monotonic_groups(cb):
 
 def main():
 	# Load post-FWHT K data
-	print("Loading post-FWHT K data from /tmp/turbo_postrot.bin...")
+	print("Loading post-FWHT K data from /tmp/rq_postrot.bin...")
 	n_vec = 10000
-	raw = np.fromfile("/tmp/turbo_postrot.bin", dtype=np.float32, count=n_vec * T)
+	raw = np.fromfile("/tmp/rq_postrot.bin", dtype=np.float32, count=n_vec * T)
 	data = raw.reshape(n_vec, T)
 	print(f"  {n_vec} vectors, mean={np.mean(data):.6f}, std={np.std(data):.6f} (expect {SIGMA:.6f})")
 

@@ -2,7 +2,7 @@
 """Analyze TCQ quantization error autocorrelation from kernel dump.
 
 Usage:
-	1. Run llama-perplexity with TURBO_TCQ_DUMP_ERRORS=N (e.g. 1000)
+	1. Run llama-perplexity with RQ_ISO_DUMP_ERRORS=N (e.g. 1000)
 	2. Copy /tmp/tcq_errors.bin from server
 	3. python3 scripts/analyze_tcq_errors.py [tcq_errors.bin] [codebook.bin] [--bits 3]
 
@@ -106,7 +106,7 @@ def main():
 	if cb_path:
 		codebook = np.fromfile(cb_path, dtype=np.float32)
 	else:
-		# Use compiled-in codebook (hardcoded from turbo-quant-cuda.cuh)
+		# Use compiled-in codebook (hardcoded from rq-quant-cuda.cuh)
 		print("WARNING: No codebook provided, using default 3-bit compiled-in codebook")
 		print("For accurate results, provide the codebook used during quantization")
 		sys.exit(1)

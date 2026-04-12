@@ -151,7 +151,7 @@ def load_codebook_from_file(path):
 	import re
 	with open(path) as f:
 		text = f.read()
-	m = re.search(r'static __constant__ float d_turbo3_tcq_codebook\[512\] = \{\n(.*?)\};', text, re.DOTALL)
+	m = re.search(r'static __constant__ float d_rq3_iso_codebook\[512\] = \{\n(.*?)\};', text, re.DOTALL)
 	if not m:
 		raise ValueError(f"Codebook not found in {path}")
 	vals = [float(x.strip().rstrip('f')) for x in m.group(1).replace('\n', ',').split(',') if x.strip()]
@@ -164,7 +164,7 @@ def fp16_roundtrip(x):
 def main():
 	# Load K data
 	print("Loading post-FWHT K data...")
-	raw = np.fromfile('/tmp/turbo_postrot.bin', dtype=np.float32)
+	raw = np.fromfile('/tmp/rq_postrot.bin', dtype=np.float32)
 	n_vec = len(raw) // BLOCK_SIZE
 	k_data = raw[:n_vec * BLOCK_SIZE].reshape(n_vec, BLOCK_SIZE)
 	print(f"  {n_vec} vectors loaded")
@@ -174,7 +174,7 @@ def main():
 	k_data = k_data[:n_blocks]
 
 	# Normalize each block to unit norm (as SET_ROWS does before FWHT)
-	# Note: turbo_postrot.bin is ALREADY post-FWHT, so we're analyzing the
+	# Note: rq_postrot.bin is ALREADY post-FWHT, so we're analyzing the
 	# same data the Viterbi sees. We just need to normalize.
 	norms = np.sqrt(np.sum(k_data ** 2, axis=1, keepdims=True))
 	norms = np.maximum(norms, 1e-10)

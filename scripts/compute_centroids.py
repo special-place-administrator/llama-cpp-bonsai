@@ -2,9 +2,9 @@
 """Compute empirical Lloyd-Max centroids from post-FWHT KV cache data.
 
 Usage:
-	python3 scripts/compute_centroids.py /tmp/turbo_postrot.bin
+	python3 scripts/compute_centroids.py /tmp/rq_postrot.bin
 
-Reads float32 samples dumped by TURBO_EXTRACT mode and computes
+Reads float32 samples dumped by RQ_EXTRACT mode and computes
 optimal 4-bit (16-level), 3-bit (8-level), and 2-bit (4-level)
 Lloyd-Max centroids via iterative conditional-expectation algorithm.
 """

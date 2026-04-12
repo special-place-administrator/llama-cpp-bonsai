@@ -6,7 +6,7 @@
 
 A fork of [llama.cpp](https://github.com/ggml-org/llama.cpp) with **Trellis-Coded Quantization (TCQ)** for KV cache compression. 2-3x more context in the same VRAM, with quality that matches or beats FP16.
 
-**Paper**: [Closing the Gap: Trellis-Coded Quantization for KV Cache at 2-3 Bits](https://huggingface.co/datasets/spiritbuun/turboquant-tcq-kv-cache)
+**Paper**: [Closing the Gap: Trellis-Coded Quantization for KV Cache at 2-3 Bits](https://huggingface.co/datasets/spiritbuun/rotorquant-tcq-kv-cache)
 
 ## What is TCQ?
 
@@ -29,13 +29,13 @@ cmake --build build -j$(nproc)
 
 ## Recommended configurations
 
-### turbo4 (4.25 bpv) -- lossless quality, great compression
+### rq4 (4.25 bpv) -- lossless quality, great compression
 
 The safe default. Virtually no quality loss vs FP16 with ~3.8x KV cache compression and no speed penalty.
 
 ```sh
 ./build/bin/llama-server -m model.gguf -ngl 99 -fa \
-  -ctk turbo4 -ctv turbo4
+  -ctk rq4 -ctv rq4
 ```
 
 ### 3-bit TCQ (3.25 bpv) -- best quality at 3-bit
@@ -44,7 +44,7 @@ Beats FP16 quality at short context, stays within 2% at long context. ~5x KV cac
 
 ```sh
 ./build/bin/llama-server -m model.gguf -ngl 99 -fa \
-  -ctk turbo3_tcq -ctv turbo3_tcq
+  -ctk rq3_iso -ctv rq3_iso
 ```
 
 ### 2-bit TCQ (2.25 bpv) -- maximum compression
@@ -53,7 +53,7 @@ Beats FP16 quality at short context, stays within 2% at long context. ~5x KV cac
 
 ```sh
 ./build/bin/llama-server -m model.gguf -ngl 99 -fa \
-  -ctk turbo2_tcq -ctv turbo2_tcq
+  -ctk rq4_iso -ctv rq4_iso
 ```
 
 ### Asymmetric 2.75 bpv -- best 2-bit quality
@@ -62,21 +62,21 @@ Beats FP16 quality at short context, stays within 2% at long context. ~5x KV cac
 
 ```sh
 ./build/bin/llama-server -m model.gguf -ngl 99 -fa \
-  -ctk turbo3_tcq -ctv turbo2_tcq
+  -ctk rq3_iso -ctv rq4_iso
 ```
 
-### Scalar turbo3 / turbo2 (3.25 / 2.25 bpv) -- no trellis
+### Scalar rq3 / rq2 (3.25 / 2.25 bpv) -- no trellis
 
 Scalar quantization without TCQ. Faster encode, worse quality than TCQ equivalents.
 
 ```sh
 # 3-bit scalar
 ./build/bin/llama-server -m model.gguf -ngl 99 -fa \
-  -ctk turbo3 -ctv turbo3
+  -ctk rq3 -ctv rq3
 
 # 2-bit scalar
 ./build/bin/llama-server -m model.gguf -ngl 99 -fa \
-  -ctk turbo2 -ctv turbo2
+  -ctk rq2 -ctv rq2
 ```
 
 ## Quality (KL-divergence, Qwen3.5-27B Q6_K, RTX 3090)
@@ -85,9 +85,9 @@ Lower is better. Measured against FP16 KV cache base logits.
 
 | Config | bpv | KLD @2K | KLD @7K |
 |--------|-----|---------|---------|
-| turbo3_tcq (symmetric) | 3.25 | 0.058 | 0.074 |
-| turbo3_tcq-K / turbo2_tcq-V | 2.75 | 0.078 | 0.101 |
-| turbo2_tcq (symmetric) | 2.25 | 0.101 | 0.136 |
+| rq3_iso (symmetric) | 3.25 | 0.058 | 0.074 |
+| rq3_iso-K / rq4_iso-V | 2.75 | 0.078 | 0.101 |
+| rq4_iso (symmetric) | 2.25 | 0.101 | 0.136 |
 
 3-bit TCQ at 2K context achieves **lower perplexity than FP16** (5.802 vs 5.805) due to a mild regularizing effect from norm scaling.
 
@@ -96,8 +96,8 @@ Lower is better. Measured against FP16 KV cache base logits.
 | Config | Decode (tg64) | vs q8_0 |
 |--------|---------------|---------|
 | q8_0 | 31.04 tok/s | -- |
-| turbo3_tcq | 30.04 tok/s | 97% |
-| turbo3 (scalar) | 30.04 tok/s | 97% |
+| rq3_iso | 30.04 tok/s | 97% |
+| rq3 (scalar) | 30.04 tok/s | 97% |
 
 Decode speed is constant across context lengths (30 tok/s at 4K, 65K, and 128K). Prefill uses tensor-core MMA path at 99%+ of q8_0 speed.
 
@@ -106,10 +106,10 @@ Decode speed is constant across context lengths (30 tok/s at 4K, 65K, and 128K).
 Trained codebooks are included in `codebooks/`. The defaults are compiled into the CUDA kernels, but you can override them:
 
 ```sh
-TURBO_TCQ_CB=codebooks/3bit/product_aware_iter080.bin \
-TURBO_TCQ_CB2=codebooks/2bit/product_aware_iter090.bin \
+RQ_ISO_CB=codebooks/3bit/product_aware_iter080.bin \
+RQ_ISO_CB2=codebooks/2bit/product_aware_iter090.bin \
 ./build/bin/llama-server -m model.gguf -ngl 99 -fa \
-  -ctk turbo3_tcq -ctv turbo3_tcq
+  -ctk rq3_iso -ctv rq3_iso
 ```
 
 Codebook training scripts are in `scripts/tcq_train_*.py`.
