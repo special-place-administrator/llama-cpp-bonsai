@@ -126,17 +126,29 @@ static __constant__ float d_rq4_iso_codebook_fattn[256] = {
     -0.13432936f, -0.05269006f, +0.03536416f, +0.117640756f, -0.022776067f, +0.042032316f, +0.10472976f, +0.18042557f
 };
 
-// FWHT rotation sign arrays for FA inline rotation (same values as rq-quant-cuda.cuh)
-static __constant__ float d_rq_wht_signs1_fattn[128] = {
-    -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f};
-static __constant__ float d_rq_wht_signs2_fattn[128] = {
-    1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f};
+// Givens rotation constants for FA inline rotation (same values as rq-constants.cuh)
+#include "rq-constants.cuh"
+
+// Givens rotation constants for fattn (aliased from rq-constants.cuh via include above)
+// RQ_COS[64], RQ_SIN[64] — PlanarQuant Givens pairs
+// RQ_ISO_QW/QX/QY/QZ[32] — IsoQuant quaternion groups
+
+// Quaternion multiply helper for FA inline rotation
+static __device__ __forceinline__ void rq_quat_mul_fattn(
+        float aw, float ax, float ay, float az,
+        float bw, float bx, float by, float bz,
+        float *rw, float *rx, float *ry, float *rz) {
+    *rw = aw*bw - ax*bx - ay*by - az*bz;
+    *rx = aw*bx + ax*bw + ay*bz - az*by;
+    *ry = aw*by - ax*bz + ay*bw + az*bx;
+    *rz = aw*bz + ax*by - ay*bx + az*bw;
+}
 
 // InnerQ: per-channel inverse scale for Q pre-rotation (fattn compilation unit)
 // Initialized to all 1.0 (identity). Updated by rq_innerq_finalize_calibration().
 static __device__ float d_innerq_channel_scale_inv_fattn[128];
 
-// Q² calibration: accumulate per-position E[Q²] after FWHT rotation
+// Q² calibration: accumulate per-position E[Q²] after Givens/quaternion rotation
 // Used for product-aware TCQ codebook training (weight positions by query importance)
 // Enabled by RQ_Q_CALIBRATE=1 env var
 static __device__ double d_q_channel_sq_fattn[128]; // sum of Q²ᵢ per position

@@ -261,8 +261,8 @@ static __global__ void flash_attn_ext_vec(
     }
 
     // Q pre-rotation for rq types is now handled externally in ggml_cuda_flash_attn_ext
-    // (k_rq_fwht_forward kernel), before the vec kernel launch. This reduces register
-    // pressure and eliminates 22 syncthreads per decode token (D=256).
+    // (k_rq_givens_forward kernel), before the vec kernel launch. This reduces register
+    // pressure and eliminates syncthreads per decode token.
 
     const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
     K     += blockIdx.y*nthreads * nb11;

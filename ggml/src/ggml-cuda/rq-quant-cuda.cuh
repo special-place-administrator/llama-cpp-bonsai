@@ -2,9 +2,10 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include "ggml-common.h"
+#include "rq-constants.cuh"
 
 // === InnerQ per-channel equalization ===
-// Scale K channels before L2 norm + FWHT to reduce quantization error on anisotropic distributions.
+// Scale K channels before L2 norm + rotation to reduce quantization error on anisotropic distributions.
 // Inverse scale applied to Q in FA kernel to preserve dot products.
 // Calibration: accumulate per-channel K^2, then set scale[i] = 1/sqrt(mean(K_i^2) * 128).
 static __device__ float d_innerq_channel_scale[128];     // per-channel K scale (init to 1.0)
@@ -21,12 +22,12 @@ extern void rq_innerq_init_fattn();
 extern void rq_q_calibrate_init();
 extern void rq_q_calibrate_finalize();
 
-// TCQ error dump: save post-FWHT normalized values and output symbols for autocorrelation analysis
+// TCQ error dump: save post-rotation normalized values and output symbols for autocorrelation analysis
 static __device__ float   * d_tcq_dump_x_buf   = nullptr; // [max_groups][128] original values
 static __device__ uint8_t * d_tcq_dump_out_buf  = nullptr; // [max_groups][128] output symbols
 static __device__ int       d_tcq_dump_max      = 0;       // max groups to dump (0 = disabled)
 
-// === Post-FWHT data extraction for empirical codebook computation ===
+// === Post-rotation data extraction for empirical codebook computation ===
 // Enabled by RQ_EXTRACT=<max_samples> env var (e.g. RQ_EXTRACT=2000000)
 // Dumps post-rotation normalized values to /tmp/rq_postrot.bin (float32)
 // Device-visible extraction state
@@ -267,34 +268,64 @@ static __constant__ float d_rq_mid_4bit[15] = {
      0.070693f,  0.097191f,  0.127056f,  0.162977f,  0.212232f,
 };
 
-// === FWHT rotation sign arrays (from rq-rotate.h, seed=42 rotation, seed=1042 QJL) ===
-static __constant__ float d_rq_wht_signs1[128] = {
-    -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f};
-static __constant__ float d_rq_wht_signs2[128] = {
-    1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 1.0f, -1.0f};
-// QJL sign arrays removed — rq4 now uses pure 4-bit PolarQuant (no QJL correction)
-
-// === FWHT rotation functions ===
+// === Givens rotation functions (PlanarQuant: 64 pairs for d=128) ===
+// Forward: r0 = cos*v0 - sin*v1,  r1 = sin*v0 + cos*v1
 static __device__ __forceinline__
-void rq_fwht_128_cuda(float * x) {
-    for (int h = 1; h < 128; h *= 2) {
-        for (int i = 0; i < 128; i += h * 2) {
-            for (int j = i; j < i + h; j++) {
-                float a = x[j], b = x[j + h];
-                x[j] = a + b; x[j + h] = a - b;
-            }
-        }
+void rq_givens_forward_cuda(float * x) {
+    float tmp[128];
+    for (int p = 0; p < 64; p++) {
+        float v0 = x[2*p], v1 = x[2*p + 1];
+        tmp[2*p]     = RQ_COS[p] * v0 - RQ_SIN[p] * v1;
+        tmp[2*p + 1] = RQ_SIN[p] * v0 + RQ_COS[p] * v1;
     }
-    const float inv_sqrt_128 = 0.08838834764831845f;
-    for (int i = 0; i < 128; i++) x[i] *= inv_sqrt_128;
+    for (int i = 0; i < 128; i++) x[i] = tmp[i];
 }
 
-// Forward rotation: signs1 → FWHT → signs2
+// Inverse: r0 = cos*v0 + sin*v1,  r1 = -sin*v0 + cos*v1
 static __device__ __forceinline__
-void rq_rotate_forward_cuda(float * x, const float * s1, const float * s2) {
-    for (int i = 0; i < 128; i++) x[i] *= s1[i];
-    rq_fwht_128_cuda(x);
-    for (int i = 0; i < 128; i++) x[i] *= s2[i];
+void rq_givens_inverse_cuda(float * x) {
+    float tmp[128];
+    for (int p = 0; p < 64; p++) {
+        float v0 = x[2*p], v1 = x[2*p + 1];
+        tmp[2*p]     =  RQ_COS[p] * v0 + RQ_SIN[p] * v1;
+        tmp[2*p + 1] = -RQ_SIN[p] * v0 + RQ_COS[p] * v1;
+    }
+    for (int i = 0; i < 128; i++) x[i] = tmp[i];
+}
+
+// === Quaternion rotation functions (IsoQuant: 32 groups of 4 for d=128) ===
+static __device__ __forceinline__
+void rq_quat_mul_dev(float aw, float ax, float ay, float az,
+                     float bw, float bx, float by, float bz,
+                     float *rw, float *rx, float *ry, float *rz) {
+    *rw = aw*bw - ax*bx - ay*by - az*bz;
+    *rx = aw*bx + ax*bw + ay*bz - az*by;
+    *ry = aw*by - ax*bz + ay*bw + az*bx;
+    *rz = aw*bz + ax*by - ay*bx + az*bw;
+}
+
+// Forward quaternion rotation: q * v
+static __device__ __forceinline__
+void rq_quat_forward_cuda(float * x) {
+    float tmp[128];
+    for (int g = 0; g < 32; g++) {
+        rq_quat_mul_dev(RQ_ISO_QW[g], RQ_ISO_QX[g], RQ_ISO_QY[g], RQ_ISO_QZ[g],
+                        x[4*g], x[4*g+1], x[4*g+2], x[4*g+3],
+                        &tmp[4*g], &tmp[4*g+1], &tmp[4*g+2], &tmp[4*g+3]);
+    }
+    for (int i = 0; i < 128; i++) x[i] = tmp[i];
+}
+
+// Inverse quaternion rotation: conj(q) * v
+static __device__ __forceinline__
+void rq_quat_inverse_cuda(float * x) {
+    float tmp[128];
+    for (int g = 0; g < 32; g++) {
+        rq_quat_mul_dev(RQ_ISO_QW[g], -RQ_ISO_QX[g], -RQ_ISO_QY[g], -RQ_ISO_QZ[g],
+                        x[4*g], x[4*g+1], x[4*g+2], x[4*g+3],
+                        &tmp[4*g], &tmp[4*g+1], &tmp[4*g+2], &tmp[4*g+3]);
+    }
+    for (int i = 0; i < 128; i++) x[i] = tmp[i];
 }
 
 static __device__ __forceinline__
@@ -394,7 +425,7 @@ static __global__ void k_set_rows_rq3(
     float grp_norm = sqrtf(norm_sq);
     float inv_norm = grp_norm > 1e-10f ? 1.0f / grp_norm : 0.0f;
     for (int j = 0; j < 128; j++) x[j] *= inv_norm;
-    rq_rotate_forward_cuda(x, d_rq_wht_signs1, d_rq_wht_signs2);
+    rq_givens_forward_cuda(x);
     // Post-rotation extraction (if enabled)
     rq_extract_append(x);
     // Quantize and accumulate reconstruction norm for correction
@@ -449,8 +480,8 @@ void quantize_f32_rq4_0_block(const float * src, block_rq4_0 * dst) {
     float inv_norm = norm > 1e-10f ? 1.0f / norm : 0.0f;
     float x[128];
     for (int j = 0; j < 128; j++) x[j] = src[j] * inv_norm;
-    // Forward FWHT rotation before quantization
-    rq_rotate_forward_cuda(x, d_rq_wht_signs1, d_rq_wht_signs2);
+    // Forward Givens rotation before quantization
+    rq_givens_forward_cuda(x);
     // Post-rotation extraction (if enabled)
     rq_extract_append(x);
     // 4-bit quantization: find nearest of 16 centroids, pack 2 per byte
@@ -525,7 +556,7 @@ static __global__ void k_set_rows_rq2(
     float grp_norm = sqrtf(norm_sq);
     float inv_norm = grp_norm > 1e-10f ? 1.0f / grp_norm : 0.0f;
     for (int j = 0; j < 128; j++) x[j] *= inv_norm;
-    rq_rotate_forward_cuda(x, d_rq_wht_signs1, d_rq_wht_signs2);
+    rq_givens_forward_cuda(x);
     float recon_norm_sq = 0.0f;
     for (int b = 0; b < blocks_per_group; b++) {
         block_rq2_0 & blk = dst_row_ptr[grp_idx * blocks_per_group + b];
@@ -723,19 +754,15 @@ static __global__ void __launch_bounds__(512, 1) k_set_rows_rq3_iso(
     if (sid < 128) x[sid] *= inv_norm;
     __syncthreads();
 
-    // FWHT
-    if (sid < 128) x[sid] *= d_rq_wht_signs1[sid];
-    __syncthreads();
-    for (int h = 1; h < 128; h *= 2) {
-        if (sid < 64) {
-            int j = (sid / h) * (2 * h) + (sid % h);
-            float a = x[j], b = x[j + h];
-            x[j] = a + b; x[j + h] = a - b;
-        }
-        __syncthreads();
+    // Forward quaternion rotation (32 groups of 4, each thread handles one group)
+    if (sid < 32) {
+        const int g = sid;
+        float v0 = x[4*g], v1 = x[4*g+1], v2 = x[4*g+2], v3 = x[4*g+3];
+        float r0, r1, r2, r3;
+        rq_quat_mul_dev(RQ_ISO_QW[g], RQ_ISO_QX[g], RQ_ISO_QY[g], RQ_ISO_QZ[g],
+                        v0, v1, v2, v3, &r0, &r1, &r2, &r3);
+        x[4*g] = r0; x[4*g+1] = r1; x[4*g+2] = r2; x[4*g+3] = r3;
     }
-    constexpr float inv_sqrt_128 = 0.08838834764831845f;
-    if (sid < 128) x[sid] *= inv_sqrt_128 * d_rq_wht_signs2[sid];
     __syncthreads();
 
     if (sid == 0) rq_extract_append(x);
@@ -1029,19 +1056,15 @@ static __global__ void __launch_bounds__(256, 1) k_set_rows_rq4_iso(
     if (sid < 128) x[sid] *= inv_norm;
     __syncthreads();
 
-    // FWHT
-    if (sid < 128) x[sid] *= d_rq_wht_signs1[sid];
-    __syncthreads();
-    for (int h = 1; h < 128; h *= 2) {
-        if (sid < 64) {
-            int j = (sid / h) * (2 * h) + (sid % h);
-            float a = x[j], b = x[j + h];
-            x[j] = a + b; x[j + h] = a - b;
-        }
-        __syncthreads();
+    // Forward quaternion rotation (32 groups of 4, each thread handles one group)
+    if (sid < 32) {
+        const int g = sid;
+        float v0 = x[4*g], v1 = x[4*g+1], v2 = x[4*g+2], v3 = x[4*g+3];
+        float r0, r1, r2, r3;
+        rq_quat_mul_dev(RQ_ISO_QW[g], RQ_ISO_QX[g], RQ_ISO_QY[g], RQ_ISO_QZ[g],
+                        v0, v1, v2, v3, &r0, &r1, &r2, &r3);
+        x[4*g] = r0; x[4*g+1] = r1; x[4*g+2] = r2; x[4*g+3] = r3;
     }
-    constexpr float inv_sqrt_128 = 0.08838834764831845f;
-    if (sid < 128) x[sid] *= inv_sqrt_128 * d_rq_wht_signs2[sid];
     __syncthreads();
 
     if (sid == 0) rq_extract_append(x);

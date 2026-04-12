@@ -461,9 +461,9 @@ static __global__ void k_rq4_dequant_f16(
     dst[strm * (ne2 * ne1 * ne0) + head * (ne1 * ne0) + row * ne0 + j] = __float2half(val);
 }
 
-// rq4 K dequant with inverse FWHT: produces K in original (unrotated) domain
+// rq4 K dequant with inverse Givens rotation: produces K in original (unrotated) domain
 // so Q does NOT need pre-rotation. 128 threads per block, loops over 128-element rq4 blocks.
-static __global__ void k_rq4_dequant_f16_inv_fwht(
+static __global__ void k_rq4_dequant_f16_inv_givens(
         const char * __restrict__ src, half * __restrict__ dst,
         const int64_t ne0, const int64_t ne1, const int64_t ne2,
         const size_t nb1, const size_t nb2, const size_t nb3) {
@@ -477,33 +477,28 @@ static __global__ void k_rq4_dequant_f16_inv_fwht(
 
     __shared__ float smem[128];
 
-    const float * s1 = d_rq_wht_signs1_fattn;
-    const float * s2 = d_rq_wht_signs2_fattn;
-    constexpr float inv_sqrt_128 = 0.08838834764831845f;
-
     const int n_blocks = (int)(ne0 / QK_RQ4);
 
     for (int blk_idx = 0; blk_idx < n_blocks; blk_idx++) {
         const block_rq4_0 * blk = (const block_rq4_0 *)src_row + blk_idx;
         const float norm = __half2float(blk->norm);
 
-        // Extract 4-bit index, lookup centroid, apply signs2
+        // Extract 4-bit index, lookup centroid
         const uint8_t idx = (tid & 1) ? (blk->qs[tid / 2] >> 4) : (blk->qs[tid / 2] & 0xF);
-        smem[tid] = d_rq_centroids_4bit_fattn[idx] * s2[tid];
+        smem[tid] = d_rq_centroids_4bit_fattn[idx];
         __syncthreads();
 
-        // 7 butterfly passes (inverse FWHT)
-        for (int h = 1; h < 128; h *= 2) {
-            if (tid < 64) {
-                int j = (tid / h) * (2 * h) + (tid % h);
-                float a = smem[j], b = smem[j + h];
-                smem[j] = a + b; smem[j + h] = a - b;
-            }
-            __syncthreads();
+        // Inverse Givens rotation (64 pairs, each thread handles one pair)
+        if (tid < 64) {
+            const int p = tid;
+            float v0 = smem[2*p], v1 = smem[2*p + 1];
+            smem[2*p]     =  RQ_COS[p] * v0 + RQ_SIN[p] * v1;
+            smem[2*p + 1] = -RQ_SIN[p] * v0 + RQ_COS[p] * v1;
         }
+        __syncthreads();
 
-        // Normalize, apply signs1, undo InnerQ scaling, apply norm, cast to fp16
-        float val = smem[tid] * inv_sqrt_128 * s1[tid] * d_innerq_channel_scale_inv_fattn[tid] * norm;
+        // Undo InnerQ scaling, apply norm, cast to fp16
+        float val = smem[tid] * d_innerq_channel_scale_inv_fattn[tid] * norm;
         dst[dst_base + blk_idx * 128 + tid] = __float2half(val);
     }
 }
@@ -518,40 +513,35 @@ static size_t  kv_dequant_k_buf_size[GGML_CUDA_MAX_DEVICES] = {};
 static half * kv_dequant_v_buf[GGML_CUDA_MAX_DEVICES] = {};
 static size_t  kv_dequant_v_buf_size[GGML_CUDA_MAX_DEVICES] = {};
 
-// === FWHT rotation kernels for pre-rotate-queries approach ===
-// Forward rotation on Q before attention (both prefill and decode paths).
-// One block per 128-element group, 128 threads per block.
-static __global__ void k_rq_fwht_forward(
+// === Givens rotation kernel for pre-rotate-queries approach ===
+// Forward Givens rotation on Q before attention (both prefill and decode paths).
+// One block per 128-element group, 128 threads per block (64 active for rotation).
+static __global__ void k_rq_givens_forward(
         const float * __restrict__ src, float * __restrict__ dst,
         const int64_t n_elements) {
     const int64_t offset = blockIdx.x * 128;
     if (offset >= n_elements) return;
-
-    const float * s1 = d_rq_wht_signs1_fattn;
-    const float * s2 = d_rq_wht_signs2_fattn;
 
     __shared__ float buf[128];
 
     if (threadIdx.x < 128) {
         // InnerQ: apply inverse channel scale to Q before rotation
         // This compensates for the channel scaling applied to K in SET_ROWS
-        buf[threadIdx.x] = src[offset + threadIdx.x] * d_innerq_channel_scale_inv_fattn[threadIdx.x] * s1[threadIdx.x];
+        buf[threadIdx.x] = src[offset + threadIdx.x] * d_innerq_channel_scale_inv_fattn[threadIdx.x];
     }
     __syncthreads();
 
-    // Parallel FWHT butterfly: 64 threads, 7 passes
-    for (int h = 1; h < 128; h *= 2) {
-        if (threadIdx.x < 64) {
-            int j = (threadIdx.x / h) * (2 * h) + (threadIdx.x % h);
-            float a = buf[j], b = buf[j + h];
-            buf[j] = a + b; buf[j + h] = a - b;
-        }
-        __syncthreads();
+    // Forward Givens rotation: 64 pairs, each thread handles one pair
+    if (threadIdx.x < 64) {
+        const int p = threadIdx.x;
+        float v0 = buf[2*p], v1 = buf[2*p + 1];
+        buf[2*p]     = RQ_COS[p] * v0 - RQ_SIN[p] * v1;
+        buf[2*p + 1] = RQ_SIN[p] * v0 + RQ_COS[p] * v1;
     }
+    __syncthreads();
 
-    constexpr float inv_sqrt_128 = 0.08838834764831845f;
     if (threadIdx.x < 128) {
-        float val = buf[threadIdx.x] * inv_sqrt_128 * s2[threadIdx.x];
+        float val = buf[threadIdx.x];
         dst[offset + threadIdx.x] = val;
 
         // Q² calibration: accumulate per-position squared values
@@ -638,8 +628,8 @@ static void ggml_cuda_rq_prefill_attend(ggml_backend_cuda_context & ctx, ggml_te
             k_rq4_iso_dequant_f16<<<grid_k, K->ne[0], 0, stream>>>(
                 (const char *)K->data, k_fp16, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3], d_tcq_decode_alpha_k);
         } else {
-            // rq4 K: inverse FWHT dequant → produces K in original domain (no Q rotation needed)
-            k_rq4_dequant_f16_inv_fwht<<<grid_k, 128, 0, stream>>>(
+            // rq4 K: inverse Givens dequant → produces K in original domain (no Q rotation needed)
+            k_rq4_dequant_f16_inv_givens<<<grid_k, 128, 0, stream>>>(
                 (const char *)K->data, k_fp16, K->ne[0], K->ne[1], K->ne[2], K->nb[1], K->nb[2], K->nb[3]);
         }
     }
@@ -733,7 +723,7 @@ static void ggml_cuda_rq_prefill_attend(ggml_backend_cuda_context & ctx, ggml_te
     }
 
     // Rotate Q for rq pre-rotate-queries (only when K is in rotated space)
-    // rq4 K is dequanted via inverse FWHT → original domain, so Q stays unrotated
+    // rq4 K is dequanted via inverse Givens → original domain, so Q stays unrotated
     const ggml_tensor * Q = dst->src[0];
     float * q_rotated = nullptr;
     if (rq_k && K->type != GGML_TYPE_RQ4_0 && Q->ne[0] % 128 == 0) {
@@ -745,7 +735,7 @@ static void ggml_cuda_rq_prefill_attend(ggml_backend_cuda_context & ctx, ggml_te
         }
         q_rotated = q_rot_buf[device];
         const int64_t n_q_groups = ggml_nelements(Q) / 128;
-        k_rq_fwht_forward<<<(int)n_q_groups, 128, 0, stream>>>(
+        k_rq_givens_forward<<<(int)n_q_groups, 128, 0, stream>>>(
             (const float *)Q->data, q_rotated, ggml_nelements(Q));
     }
 
@@ -1146,7 +1136,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const ggml_tensor * V = dst->src[2];
 
     // RQ prefill: dequant to fp16 and use tensor core MMA for batched attention.
-    // rq4 K uses inverse FWHT during dequant — mixes centroids in float32 shmem before
+    // rq4 K uses inverse Givens during dequant — mixes centroids in float32 shmem before
     // fp16 cast, so precision is fine. rq2/rq3 use simple centroid×norm dequant.
     // Set RQ_PREFILL_VEC=1 to force vec kernel for all rq types (debug override).
     static const bool rq_prefill_vec = [] {
@@ -1157,7 +1147,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const bool rq_kv = K->type == GGML_TYPE_RQ2_0 || K->type == GGML_TYPE_RQ3_0 || K->type == GGML_TYPE_RQ4_0 || K->type == GGML_TYPE_RQ3_ISO || K->type == GGML_TYPE_RQ4_ISO ||
                           V->type == GGML_TYPE_RQ2_0 || V->type == GGML_TYPE_RQ3_0 || V->type == GGML_TYPE_RQ4_0 || V->type == GGML_TYPE_RQ3_ISO || V->type == GGML_TYPE_RQ4_ISO;
     if (rq_kv && !rq_prefill_vec && Q->ne[1] > 1 && Q->ne[0] <= 256 && turing_mma_available(ggml_cuda_info().devices[ggml_cuda_get_device()].cc)) {
-        // Prefill path: rq4 K uses inverse FWHT dequant (original domain, no Q rotation),
+        // Prefill path: rq4 K uses inverse Givens dequant (original domain, no Q rotation),
         // rq2/3 K uses simple dequant (rotated domain, Q pre-rotated). V un-rotation at graph level.
         ggml_cuda_rq_prefill_attend(ctx, dst);
     } else {
@@ -1309,7 +1299,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
                 q_rot_buf_size[device_dec] = q_size;
             }
             const int64_t n_q_groups = ggml_nelements(Q) / 128;
-            k_rq_fwht_forward<<<(int)n_q_groups, 128, 0, stream>>>(
+            k_rq_givens_forward<<<(int)n_q_groups, 128, 0, stream>>>(
                 (const float *)Q->data, q_rot_buf[device_dec], ggml_nelements(Q));
             Q_rot_decode = *Q;
             Q_rot_decode.data = q_rot_buf[device_dec];
