@@ -9,18 +9,8 @@
  * Values MUST match ggml-rq-quant.c exactly.
  */
 
-// PlanarQuant centroids (same as CPU)
-static __constant__ float RQ_CENTROIDS_3BIT[8] = {
-    -0.190685f, -0.117832f, -0.065717f, -0.021460f,
-     0.021460f,  0.065717f,  0.117832f,  0.190685f,
-};
-
-// Midpoints for binary search
-static __constant__ float RQ_MID_3BIT[7] = {
-    -0.154259f, -0.091775f, -0.043589f, 0.0f, 0.043589f, 0.091775f, 0.154259f,
-};
-
 // PlanarQuant Givens rotation params (64 pairs for d=128)
+// Centroids and midpoints are in rq-quant-cuda.cuh (d_rq_centroids_*bit, d_rq_mid_*bit)
 static __constant__ float RQ_COS[64] = {
     0.7386546135f, 0.8607548475f, -0.7411674857f, 0.9674890637f,
     -0.7723053098f, -0.8056974411f, -0.0412844308f, 0.2707833052f,
