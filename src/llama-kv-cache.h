@@ -127,6 +127,9 @@ public:
 
     void clear(bool data) override;
 
+    // Convert deferred F16 K cache to quantized format (call after prefill)
+    bool convert_deferred_keys();
+
     bool seq_rm  (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1) override;
     void seq_cp  (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) override;
     void seq_keep(llama_seq_id seq_id)                                                          override;
@@ -228,6 +231,14 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+
+        // deferred quantization: double-buffer for post-prefill conversion
+        // During prefill: k = F16 tensor (k_quant = pre-allocated quantized, empty)
+        // After convert: k = k_quant, k_stream = k_quant_stream
+        ggml_tensor * k_quant = nullptr;
+        std::vector<ggml_tensor *> k_quant_stream;  // pre-built views for quantized tensor
+        ggml_type target_type_k = GGML_TYPE_F16;
+        bool      k_needs_convert = false;
     };
 
     bool v_trans = true;  // the value tensor is transposed

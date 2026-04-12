@@ -111,9 +111,10 @@ llama_kv_cache::llama_kv_cache(
     auto ctx_for_buft = [&](ggml_backend_buffer_type_t buft) -> ggml_context * {
         auto it = ctx_map.find(buft);
         if (it == ctx_map.end()) {
+            // 3u to accommodate double-buffer k_quant tensors + stream views for deferred quantization
             const size_t n_rq_extra = is_rq ? 8 : 0; // rotation matrices + safety margin
             ggml_init_params params = {
-                /*.mem_size   =*/ size_t((2u*(1 + n_stream)*n_layer_kv + n_rq_extra)*ggml_tensor_overhead()),
+                /*.mem_size   =*/ size_t((3u*(1 + n_stream)*n_layer_kv + n_rq_extra)*ggml_tensor_overhead()),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -342,7 +343,24 @@ llama_kv_cache::llama_kv_cache(
             }
         }
 
-        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_alloc, kv_size, n_stream) : nullptr;
+        // Deferred quantization: allocate K as F16 during prefill for RQ types on GPU.
+        // This avoids error compounding from quantizing each token individually during prefill.
+        // Double-buffer: k = F16 (used during prefill), k_quant = quantized (used after conversion)
+        auto is_rq_type = [](ggml_type t) {
+            return t == GGML_TYPE_RQ2_0 || t == GGML_TYPE_RQ3_0 || t == GGML_TYPE_RQ4_0 ||
+                   t == GGML_TYPE_RQ3_ISO || t == GGML_TYPE_RQ4_ISO;
+        };
+        const bool defer_k = !cpu_fallback && is_rq_type(layer_type_k);
+        ggml_type alloc_type_k = layer_type_k;
+        ggml_tensor * k_quant_tensor = nullptr;
+        if (defer_k) {
+            alloc_type_k = GGML_TYPE_F16;  // prefill at F16 precision
+            // Pre-allocate quantized tensor (data uninitialized until conversion)
+            k_quant_tensor = has_k ? ggml_new_tensor_3d(ctx, layer_type_k, n_embd_k_alloc, kv_size, n_stream) : nullptr;
+            if (k_quant_tensor) ggml_format_name(k_quant_tensor, "cache_k_quant_l%d", il);
+        }
+
+        ggml_tensor * k = has_k ? ggml_new_tensor_3d(ctx, alloc_type_k, n_embd_k_alloc, kv_size, n_stream) : nullptr;
         ggml_tensor * v = has_v ? ggml_new_tensor_3d(ctx, layer_type_v, n_embd_v_alloc, kv_size, n_stream) : nullptr;
 
         has_k && ggml_format_name(k, "cache_k_l%d", il);
@@ -358,7 +376,21 @@ llama_kv_cache::llama_kv_cache(
 
         map_layer_ids[il] = layers.size();
 
+        // Pre-build quantized stream views (for deferred types)
+        std::vector<ggml_tensor *> k_quant_stream;
+        if (defer_k && k_quant_tensor) {
+            for (uint32_t s = 0; s < n_stream; ++s) {
+                k_quant_stream.push_back(ggml_view_2d(ctx, k_quant_tensor, n_embd_k_alloc, kv_size, k_quant_tensor->nb[1], s*k_quant_tensor->nb[2]));
+            }
+        }
+
         layers.push_back({ il, k, v, k_stream, v_stream, });
+        if (defer_k) {
+            layers.back().k_quant = k_quant_tensor;
+            layers.back().k_quant_stream = k_quant_stream;
+            layers.back().target_type_k = layer_type_k;
+            layers.back().k_needs_convert = true;
+        }
 
         // RotorQuant: create rotation matrix tensors (once, shared across layers)
         if (rq_rotation == nullptr &&
@@ -2714,4 +2746,68 @@ void llama_kv_cache_context::set_input_k_rot(ggml_tensor * dst) const {
 
 void llama_kv_cache_context::set_input_v_rot(ggml_tensor * dst) const {
     kv->set_input_v_rot(dst);
+}
+
+// Convert deferred F16 K caches to their target quantized types.
+// Call this after prefill completes but before decode begins.
+// Returns true if any conversions were performed.
+bool llama_kv_cache::convert_deferred_keys() {
+    bool any_converted = false;
+
+    for (auto & layer : layers) {
+        if (!layer.k_needs_convert || !layer.k || !layer.k_quant) {
+            continue;
+        }
+
+        // Convert F16 K cache -> quantized via CPU fallback.
+        // The CUDA ggml_cpy path handles this on GPU when called through a compute graph.
+        // For direct conversion without a graph, we use the CPU from_float_ref path.
+        //
+        // Strategy: read F16 from GPU -> convert to F32 on CPU -> quantize -> write back
+        const int64_t ne = ggml_nelements(layer.k);
+        const size_t f16_bytes = ggml_nbytes(layer.k);
+        const size_t quant_bytes = ggml_nbytes(layer.k_quant);
+
+        // Allocate CPU buffers
+        std::vector<char> f16_buf(f16_bytes);
+        std::vector<float> f32_buf(ne);
+        std::vector<char> quant_buf(quant_bytes);
+
+        // Read F16 from device
+        ggml_backend_tensor_get(layer.k, f16_buf.data(), 0, f16_bytes);
+
+        // Convert F16 -> F32
+        ggml_fp16_t * f16_data = (ggml_fp16_t *)f16_buf.data();
+        for (int64_t i = 0; i < ne; i++) {
+            f32_buf[i] = ggml_fp16_to_fp32(f16_data[i]);
+        }
+
+        // Quantize F32 -> target type using registered from_float_ref
+        const auto * traits = ggml_get_type_traits(layer.target_type_k);
+        if (traits && traits->from_float_ref) {
+            const int64_t n_per_row = layer.k->ne[0];
+            const int64_t nrows = ne / n_per_row;
+            const size_t row_quant_size = ggml_row_size(layer.target_type_k, n_per_row);
+
+            for (int64_t row = 0; row < nrows; row++) {
+                traits->from_float_ref(
+                    f32_buf.data() + row * n_per_row,
+                    quant_buf.data() + row * row_quant_size,
+                    n_per_row);
+            }
+        }
+
+        // Write quantized data to the pre-allocated quantized tensor
+        ggml_backend_tensor_set(layer.k_quant, quant_buf.data(), 0, quant_bytes);
+
+        // Swap tensor AND pre-built stream views together
+        layer.k = layer.k_quant;
+        layer.k_stream = layer.k_quant_stream;
+        layer.k_quant = nullptr;
+        layer.k_quant_stream.clear();
+        layer.k_needs_convert = false;
+        any_converted = true;
+    }
+
+    return any_converted;
 }
