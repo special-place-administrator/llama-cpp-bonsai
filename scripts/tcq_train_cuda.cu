@@ -580,7 +580,7 @@ void train(int n_train, int n_iters, int n_restarts, const char* init_file,
 
 	const char* suffixes[] = {"", "_fattn"};
 	for (int v = 0; v < 2; v++) {
-		printf("static __constant__ float d_turbo%d_tcq_codebook%s[%d] = {\n", K, suffixes[v], N_STATES);
+		printf("static __constant__ float d_rq%d_tcq_codebook%s[%d] = {\n", K, suffixes[v], N_STATES);
 		for (int i = 0; i < N_STATES; i += 8) {
 			printf("    ");
 			for (int j = i; j < i + 8 && j < N_STATES; j++) {
