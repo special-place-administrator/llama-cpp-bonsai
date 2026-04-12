@@ -271,7 +271,7 @@ def export_c_codebook(codebook, k, L, scale, mse_reduction, db_gain, name_suffix
 	print(f"\n// GLA-trained TCQ codebook: k={k}, L={L} ({n_states} states){extra_note}")
 	print(f"// MSE reduction: {mse_reduction:.1f}% vs Lloyd-Max {k}-bit, {db_gain:.2f} dB")
 	print(f"// Scaled by 1/sqrt(128) = {scale:.10f}")
-	print(f"static __constant__ float d_turbo{k}_tcq_codebook{name_suffix}[{n_states}] = {{")
+	print(f"static __constant__ float d_rq{k}_tcq_codebook{name_suffix}[{n_states}] = {{")
 	for i in range(0, n_states, 8):
 		vals = ', '.join(f'{scaled[j]:+.8f}' for j in range(i, min(i + 8, n_states)))
 		comma = ',' if i + 8 < n_states else ''
