@@ -380,7 +380,7 @@ llama_kv_cache::llama_kv_cache(
         std::vector<ggml_tensor *> k_quant_stream;
         if (defer_k && k_quant_tensor) {
             for (uint32_t s = 0; s < n_stream; ++s) {
-                k_quant_stream.push_back(ggml_view_2d(ctx, k_quant_tensor, n_embd_k_alloc, kv_size, k_quant_tensor->nb[1], s*k_quant_tensor->nb[2]));
+                k_quant_stream.push_back(ggml_view_2d(ctx, k_quant_tensor, n_embd_k_gqa, kv_size, k_quant_tensor->nb[1], s*k_quant_tensor->nb[2]));
             }
         }
 
